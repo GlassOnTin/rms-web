@@ -1,0 +1,17 @@
+[Unit]
+Description=RMS dashboard: live "tonight" capture preview builder
+After=rms-capture.service network-online.target
+Wants=rms-capture.service
+RequiresMountsFor=/mnt/nvme/RMS_data
+
+[Service]
+Type=simple
+User=ian
+Group=ian
+WorkingDirectory=/home/ian/source/rms-web
+ExecStart=/home/ian/vRMS/bin/python /home/ian/source/rms-web/make_tonight_preview.py
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

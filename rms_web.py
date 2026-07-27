@@ -62,6 +62,7 @@ def capture_status():
 
 PAGE = """<!doctype html><html><head><meta charset=utf-8>
 <meta name=viewport content="width=device-width,initial-scale=1">
+{refresh}
 <title>{title}</title><style>
 :root{{color-scheme:dark}}
 body{{margin:0;background:#0a0d14;color:#c8d0dc;font:15px/1.5 system-ui,sans-serif}}
@@ -82,6 +83,7 @@ pre{{white-space:pre-wrap;background:#0d1220;border:1px solid #1e2740;border-rad
 <header><h1>🌠 {station} meteor station</h1>
 <span class="pill {capcls}">capture: {cap}</span>
 <span class="muted">tonight: {cur}</span>
+<a href="/tonight">tonight</a>
 <a href="/">nights</a>
 <a href="/neighbours">neighbours</a>
 <a href="http://{host}:8889/cam1" target=_blank>● live view</a>
@@ -101,14 +103,14 @@ class H(BaseHTTPRequestHandler):
     def log_message(self, *a):  # quiet
         pass
 
-    def page(self, title, body):
+    def page(self, title, body, refresh=""):
         cap, cur = capture_status()
         host = self.headers.get("Host", "meteor.local").split(":")[0]
         st = nights()
         station = (st[0].split("_")[0] if st else (cur.split("_")[0] if cur != "—" else "RMS"))
         htmlout = PAGE.format(title=html.escape(title), station=html.escape(station),
                               cap=html.escape(cap), capcls=("on" if cap == "active" else "off"),
-                              cur=html.escape(cur), host=html.escape(host), body=body)
+                              cur=html.escape(cur), host=html.escape(host), body=body, refresh=refresh)
         self._send(200, "text/html; charset=utf-8", htmlout.encode())
 
     def do_GET(self):
@@ -124,7 +126,45 @@ class H(BaseHTTPRequestHandler):
             return self.neighbours()
         if u.path == "/neighbours_map.png":
             return self.serve_asset("neighbours_map.png", "image/png")
+        if u.path == "/tonight":
+            return self.tonight()
+        if u.path == "/tonight_stack.png":
+            return self.serve_asset("tonight_stack.png", "image/png")
+        if u.path == "/tonight_latest.png":
+            return self.serve_asset("tonight_latest.png", "image/png")
         self._send(404, "text/plain", b"not found")
+
+    def tonight(self):
+        import json as _json, time as _t
+        jp = os.path.join(ASSET_DIR, "tonight.json")
+        cap, _ = capture_status()
+        refresh = '<meta http-equiv="refresh" content="30">'
+        if not os.path.isfile(jp):
+            return self.page("Tonight", "<h2>Tonight</h2><p class=muted>No capture preview yet — it "
+                             "appears once tonight's capture is under way.</p>", refresh)
+        d = _json.load(open(jp))
+        stale = int(_t.time()) - d.get("last_added", 0)
+        live = stale < 120 and cap == "active"
+        mt = lambda n: int(os.path.getmtime(os.path.join(ASSET_DIR, n))) if os.path.isfile(os.path.join(ASSET_DIR, n)) else 0
+        badge = "<span class='pill on'>● live</span>" if live else "<span class='pill off'>idle</span>"
+        body = (
+            f"<h2>Tonight &nbsp;{badge}</h2>"
+            f"<p class=muted>Night <b>{html.escape(d['dir'])}</b> — auto-refreshes every 30&nbsp;s. "
+            + (f"Last frame {stale}s ago." if live else
+               "Capture not currently active; showing the most recent built preview.") + "</p>"
+            f"<div style='display:flex;gap:16px;flex-wrap:wrap;margin:10px 0'>"
+            f"<div class=card><b>{d['count']}</b><br><span class=muted>FF blocks (256 fr each)</span></div>"
+            f"<div class=card><b>{d['frames']:,}</b><br><span class=muted>frames</span></div>"
+            f"<div class=card><b>{d['duration_min']:.0f} min</b><br><span class=muted>captured tonight</span></div>"
+            f"</div>"
+            f"<h3>Latest sky (~10 s)</h3>"
+            f"<img src='/tonight_latest.png?v={mt('tonight_latest.png')}'>"
+            f"<h3>Night so far — cumulative stack</h3>"
+            f"<p class=muted>Every star trail, satellite and meteor caught since "
+            f"{html.escape(d['first_ff'])} (through {html.escape(d['last_ff'])}). Live preview — "
+            f"RMS builds the clean final stack at dawn.</p>"
+            f"<img src='/tonight_stack.png?v={mt('tonight_stack.png')}'>")
+        self.page("Tonight", body, refresh)
 
     def serve_asset(self, name, ctype):
         p = os.path.join(ASSET_DIR, os.path.basename(name))
