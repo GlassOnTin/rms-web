@@ -90,8 +90,8 @@ def main():
             running = mp.astype(np.uint8) if running is None else np.maximum(running, mp)
             latest_mp = mp; last = f; added += 1
         if added:
-            Image.fromarray(stretch(running)).save(STACK_PNG)
-            Image.fromarray(stretch(latest_mp, floor_sigma=2.0)).save(LATEST_PNG)
+            Image.fromarray(stretch(running, floor_sigma=6.0)).save(STACK_PNG)
+            Image.fromarray(stretch(latest_mp, floor_sigma=3.5)).save(LATEST_PNG)
             count = ffs.index(last) + 1 if last in ffs else 0
             frames = count * 256
             meta = {"dir": cur, "last": last, "count": count,
