@@ -1,0 +1,11 @@
+[Unit]
+Description=Refresh RMS dashboard neighbours map (GMN station list + render)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=ian
+Group=ian
+WorkingDirectory=/home/ian/source/rms-web
+ExecStart=/home/ian/vRMS/bin/python /home/ian/source/rms-web/make_neighbours_map.py --refresh

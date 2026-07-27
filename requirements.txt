@@ -1,0 +1,4 @@
+# The dashboard server (rms_web.py) uses only the Python standard library.
+# The neighbours-map generator (make_neighbours_map.py) needs:
+matplotlib
+pillow
