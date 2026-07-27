@@ -1,0 +1,16 @@
+[Unit]
+Description=RMS local web dashboard (read-only, LAN only)
+After=network-online.target
+Wants=network-online.target
+RequiresMountsFor=/mnt/nvme/RMS_data
+
+[Service]
+Type=simple
+User=ian
+Group=ian
+ExecStart=/usr/bin/python3 /home/ian/source/rms-web/rms_web.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

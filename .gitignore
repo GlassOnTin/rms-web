@@ -1,0 +1,8 @@
+# generated artifacts
+neighbours_map.png
+neighbours.json
+osm_cache/
+
+# python
+__pycache__/
+*.pyc
