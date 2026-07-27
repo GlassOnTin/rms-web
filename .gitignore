@@ -2,6 +2,11 @@
 neighbours_map.png
 neighbours.json
 osm_cache/
+tonight_stack.png
+tonight_latest.png
+tonight.json
+.tonight_running.npy
+.tonight_state.json
 
 # python
 __pycache__/
