@@ -1,0 +1,10 @@
+[Unit]
+Description=Daily RMS neighbours scorecard refresh
+
+[Timer]
+OnCalendar=*-*-* 06:15:00
+RandomizedDelaySec=20m
+Persistent=true
+
+[Install]
+WantedBy=timers.target
