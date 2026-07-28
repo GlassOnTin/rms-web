@@ -11,3 +11,4 @@ tonight.json
 # python
 __pycache__/
 *.pyc
+scorecard.json

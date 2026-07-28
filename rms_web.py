@@ -86,6 +86,7 @@ pre{{white-space:pre-wrap;background:#0d1220;border:1px solid #1e2740;border-rad
 <a href="/tonight">tonight</a>
 <a href="/">nights</a>
 <a href="/neighbours">neighbours</a>
+<a href="/scorecard">scorecard</a>
 <a href="http://{host}:8889/cam1" target=_blank>● live view</a>
 </header><main>{body}</main></body></html>"""
 
@@ -132,7 +133,50 @@ class H(BaseHTTPRequestHandler):
             return self.serve_asset("tonight_stack.png", "image/png")
         if u.path == "/tonight_latest.png":
             return self.serve_asset("tonight_latest.png", "image/png")
+        if u.path == "/scorecard":
+            return self.scorecard()
         self._send(404, "text/plain", b"not found")
+
+    def scorecard(self):
+        import json as _json
+        jp = os.path.join(ASSET_DIR, "scorecard.json")
+        if not os.path.isfile(jp):
+            return self.page("Scorecard", "<h2>Scorecard</h2><p class=muted>Not generated yet — "
+                             "it appears after the first night is processed and GMN publishes daily trajectories.</p>")
+        d = _json.load(open(jp))
+        us = d.get("our_count")
+        us_str = "—" if us is None else str(us)
+        rows = ""
+        for n in d.get("neighbours", []):
+            rows += (f"<tr><td><a href='{html.escape(n['url'])}' target=_blank><b>{html.escape(n['code'])}</b></a></td>"
+                     f"<td>{n['dist']:.0f} km</td><td><b>{n['count']}</b></td></tr>")
+        verdict = ""
+        if us == 0 and d.get("near_within_100", 0) > 0:
+            verdict = ("<p style='color:#e8590c'><b>Sensitivity gap</b> — your neighbours caught meteors you "
+                       "missed under the same sky. Tuning (gain / detection threshold / calibration) is the lever.</p>")
+        elif us and us > 0:
+            verdict = "<p style='color:#2f9e44'><b>On the board</b> — you're detecting meteors. 🌠</p>"
+        body = (
+            f"<h2>You vs your neighbours <span class=muted style='font-size:13px'>· night of "
+            f"{html.escape(d.get('our_date') or '?')}</span></h2>"
+            f"<div style='display:flex;gap:16px;flex-wrap:wrap;margin:10px 0'>"
+            f"<div class=card style='border-color:#e23b3b'><b style='font-size:22px'>{us_str}</b><br>"
+            f"<span class=muted>you ({html.escape(d.get('our_code','?'))})</span></div>"
+            f"<div class=card><b style='font-size:22px'>{d.get('near_within_50',0)}</b><br>"
+            f"<span class=muted>neighbours &le;50 km</span></div>"
+            f"<div class=card><b style='font-size:22px'>{d.get('near_within_100',0)}</b><br>"
+            f"<span class=muted>neighbours &le;100 km</span></div>"
+            f"<div class=card><b style='font-size:22px'>{d.get('total_global',0)}</b><br>"
+            f"<span class=muted>GMN worldwide</span></div></div>"
+            + verdict +
+            f"<h3>Active neighbours last night ({d.get('n_active',0)} of {d.get('n_near',0)} nearby)</h3>"
+            f"<table style='border-collapse:collapse;width:100%;font-size:13px'>"
+            f"<tr style='text-align:left;color:#7c879b'><th>station</th><th>distance</th>"
+            f"<th>meteors triangulated</th></tr>{rows}</table>"
+            f"<p class=muted style='margin-top:10px'>Counts are multi-station <em>trajectory</em> participations "
+            f"from GMN's daily summary — each station detects more single-station meteors than shown, so these are a "
+            f"floor. Station codes link to their GMN pages. Refreshed each morning after processing.</p>")
+        self.page("Scorecard", body)
 
     def tonight(self):
         import json as _json, time as _t
