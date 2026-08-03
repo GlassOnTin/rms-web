@@ -13,10 +13,25 @@ daily file is a UTC day, so a UK night straddles a file boundary — treat as in
 import os, re, json, math, glob, urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-MLAT = float(os.environ.get("STATION_LAT", "50.90"))
-MLON = float(os.environ.get("STATION_LON", "-1.06"))
 RMS_DATA = os.environ.get("RMS_DATA", "/mnt/nvme/RMS_data")
-STATION_CODE = os.environ.get("STATION_CODE", "XX0001")
+
+def _rms_cfg(key, default=None):
+    """Read a key (stationID/latitude/longitude) from the RMS .config so the
+    scorecard tracks the live station identity. Env vars override; RMS_CONFIG
+    sets the config path."""
+    path = os.environ.get("RMS_CONFIG", os.path.expanduser("~/source/RMS/.config"))
+    try:
+        for line in open(path):
+            line = line.split(";", 1)[0]
+            if line.strip().startswith(key + ":"):
+                return line.split(":", 1)[1].strip()
+    except OSError:
+        pass
+    return default
+
+STATION_CODE = os.environ.get("STATION_CODE") or _rms_cfg("stationID") or "XX0001"
+MLAT = float(os.environ.get("STATION_LAT") or _rms_cfg("latitude") or "50.90")
+MLON = float(os.environ.get("STATION_LON") or _rms_cfg("longitude") or "-1.06")
 TRAJ_URL = "https://globalmeteornetwork.org/data/traj_summary_data/daily/traj_summary_yesterday.txt"
 UA = {"User-Agent": "rms-scorecard/1.0 (personal meteor station dashboard)"}
 RADIUS_KM = 120.0
