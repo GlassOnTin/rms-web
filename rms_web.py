@@ -7,7 +7,7 @@ timelapses) over HTTP so they can be viewed in a browser without SSH. Read-only
 (GET only), stdlib-only, path-sanitised to stay within RMS_data. NOT for exposure
 to the public internet — LAN use only.
 """
-import os, html, urllib.parse, mimetypes, subprocess
+import os, re, html, urllib.parse, mimetypes, subprocess
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 ROOT = os.environ.get("RMS_DATA", "/mnt/nvme/RMS_data")
@@ -38,13 +38,24 @@ def real_within(root, rel):
         return p
     return None
 
+_NIGHT_DATE = re.compile(r"_(\d{8}_\d{6})_")
+
+
+def _night_datekey(name):
+    """Sort key = the YYYYMMDD_HHMMSS timestamp, NOT the raw name. The station code
+    prefix changes over a station's life -- a legacy 'XX0001' test id sorts after
+    'UK00DY' (X > U) and would otherwise float stale test nights to the top."""
+    m = _NIGHT_DATE.search(name)
+    return m.group(1) if m else ""
+
+
 def nights():
-    """Detection-archive dirs (one per processed night), newest first."""
+    """Detection-archive dirs (one per processed night), newest first (by date)."""
     try:
         ds = [d for d in os.listdir(ARCH_DET) if os.path.isdir(os.path.join(ARCH_DET, d))]
     except FileNotFoundError:
         ds = []
-    return sorted(ds, reverse=True)
+    return sorted(ds, key=_night_datekey, reverse=True)
 
 def find_suffix(dirpath, suffix):
     try:
@@ -297,9 +308,10 @@ class H(BaseHTTPRequestHandler):
         if not safe or not os.path.isdir(safe):
             return self._send(404, "text/plain", b"no such night")
         parts = [f"<h2>{html.escape(name)}</h2>"]
-        for label, suf in [("Captured stack", "_captured_stack.jpg"),
-                           ("Detected meteors", "_DETECTED_thumbs.jpg"),
-                           ("Captured thumbnails", "_CAPTURED_thumbs.jpg"),
+        for label, suf in [("Detected meteors", "_DETECTED_thumbs.jpg"),
+                           ("Detected meteors — night stack", "_meteors.jpg"),
+                           ("Captured stack (whole night)", "_captured_stack.jpg"),
+                           ("Captured thumbnails (sampled across the night, incl. dawn)", "_CAPTURED_thumbs.jpg"),
                            ("Field sums", "_fieldsums.png")]:
             f = find_suffix(safe, suf)
             if f:
