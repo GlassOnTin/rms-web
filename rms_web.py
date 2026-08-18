@@ -208,7 +208,7 @@ class H(BaseHTTPRequestHandler):
         import json as _json, time as _t
         jp = os.path.join(ASSET_DIR, "tonight.json")
         cap, _ = capture_status()
-        refresh = '<meta http-equiv="refresh" content="30">'
+        refresh = '<meta http-equiv="refresh" content="20">'
         if not os.path.isfile(jp):
             return self.page("Tonight", "<h2>Tonight</h2><p class=muted>No capture preview yet — it "
                              "appears once tonight's capture is under way.</p>", refresh)
@@ -219,7 +219,7 @@ class H(BaseHTTPRequestHandler):
         badge = "<span class='pill on'>● live</span>" if live else "<span class='pill off'>idle</span>"
         body = (
             f"<h2>Tonight &nbsp;{badge}</h2>"
-            f"<p class=muted>Night <b>{html.escape(d['dir'])}</b> — auto-refreshes every 30&nbsp;s. "
+            f"<p class=muted>Night <b>{html.escape(d['dir'])}</b> — auto-refreshes every 20&nbsp;s. "
             + (f"Last frame {stale}s ago." if live else
                "Capture not currently active; showing the most recent built preview.") + "</p>"
             f"<div style='display:flex;gap:16px;flex-wrap:wrap;margin:10px 0'>"
