@@ -255,7 +255,9 @@ class H(BaseHTTPRequestHandler):
         rows = ""
         for s in d.get("nearest", []):
             bcol = {"close": "#e8590c", "prime": "#2f9e44", "far": "#868e96"}.get(s["band"], "#868e96")
-            rows += (f"<tr><td><b>{html.escape(s['code'])}</b></td><td>{s['dist']:.0f} km</td>"
+            code = html.escape(s['code'])
+            url = "https://globalmeteornetwork.org/weblog/{}/{}/".format(code[:2], code)
+            rows += (f"<tr><td><a href='{url}' target=_blank><b>{code}</b></a></td><td>{s['dist']:.0f} km</td>"
                      f"<td>{html.escape(s['brg'])}</td>"
                      f"<td><span style='color:{bcol}'>●</span> {html.escape(s['band'])}</td>"
                      f"<td class=muted>{s['lat']:.3f}, {s['lon']:.3f}</td></tr>")
