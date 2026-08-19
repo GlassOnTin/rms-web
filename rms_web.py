@@ -85,6 +85,24 @@ def capture_status():
         cur = "—"
     return cap, cur
 
+def tonight_detections():
+    """Live meteor candidates from the newest RMS log: per-FF 'detected meteors: N'
+    lines emitted by the real-time detector (pre-ML; the ML filter prunes at dawn)."""
+    try:
+        logs = os.path.join(ROOT, "logs")
+        cur = sorted(f for f in os.listdir(logs) if f.startswith("log_") and f.endswith(".log"))[-1]
+        out = subprocess.run(["grep", "-F", "detected meteors:", os.path.join(logs, cur)],
+                             capture_output=True, text=True).stdout
+    except Exception:
+        return 0, []
+    total, hits = 0, []
+    for m in re.finditer(r"(FF_\S+\.fits) detected meteors: (\d+)", out):
+        total += 1
+        n = int(m.group(2))
+        if n:
+            hits.append((m.group(1), n))
+    return total, hits
+
 PAGE = """<!doctype html><html><head><meta charset=utf-8>
 <meta name=viewport content="width=device-width,initial-scale=1">
 {refresh}
@@ -217,6 +235,23 @@ class H(BaseHTTPRequestHandler):
         live = stale < 120 and cap == "active"
         mt = lambda n: int(os.path.getmtime(os.path.join(ASSET_DIR, n))) if os.path.isfile(os.path.join(ASSET_DIR, n)) else 0
         badge = "<span class='pill on'>● live</span>" if live else "<span class='pill off'>idle</span>"
+        nproc, hits = tonight_detections()
+        ncand = sum(n for _, n in hits)
+        if hits:
+            rows = ""
+            for ff, n in hits[-20:][::-1]:   # newest first, cap at 20
+                tm = re.search(r"_\d{8}_(\d{2})(\d{2})(\d{2})_", ff)
+                tm = "{}:{}:{} UTC".format(*tm.groups()) if tm else "—"
+                rows += (f"<tr><td>{tm}</td><td>{n}</td>"
+                         f"<td class=muted>{html.escape(ff)}</td></tr>")
+            dethtml = (f"<h3>Detections tonight</h3>"
+                       f"<p class=muted>Real-time detector candidates ({nproc} FF blocks screened so far). "
+                       f"The ML filter and astrometry refine these at dawn — expect the final count to be lower.</p>"
+                       f"<table style='border-spacing:12px 2px'><tr class=muted>"
+                       f"<th align=left>time</th><th align=left>n</th><th align=left>FF block</th></tr>{rows}</table>")
+        else:
+            dethtml = (f"<h3>Detections tonight</h3>"
+                       f"<p class=muted>No meteor candidates yet ({nproc} FF blocks screened so far).</p>")
         body = (
             f"<h2>Tonight &nbsp;{badge}</h2>"
             f"<p class=muted>Night <b>{html.escape(d['dir'])}</b> — auto-refreshes every 20&nbsp;s. "
@@ -226,7 +261,9 @@ class H(BaseHTTPRequestHandler):
             f"<div class=card><b>{d['count']}</b><br><span class=muted>FF blocks (256 fr each)</span></div>"
             f"<div class=card><b>{d['frames']:,}</b><br><span class=muted>frames</span></div>"
             f"<div class=card><b>{d['duration_min']:.0f} min</b><br><span class=muted>captured tonight</span></div>"
+            f"<div class=card><b>{ncand}</b><br><span class=muted>meteor candidates (pre-ML)</span></div>"
             f"</div>"
+            + dethtml +
             f"<h3>Latest sky (~10 s)</h3>"
             f"<img src='/tonight_latest.png?v={mt('tonight_latest.png')}'>"
             f"<h3>Night so far — cumulative stack</h3>"
