@@ -269,7 +269,10 @@ class H(BaseHTTPRequestHandler):
             f"<h3>Night so far — cumulative stack</h3>"
             f"<p class=muted>Every star trail, satellite and meteor caught since "
             f"{html.escape(d['first_ff'])} (through {html.escape(d['last_ff'])}). Live preview — "
-            f"RMS builds the clean final stack at dawn.</p>"
+            f"RMS builds the clean final stack at dawn. Overlay: <span style='color:#78c8ff'>stars</span>, "
+            f"<span style='color:#ffd25a'>planets</span>, <span style='color:#fff'>Moon/NCP</span>, "
+            f"<span style='color:#c878dc'>ecliptic</span>, <span style='color:#ff8c64'>N/E/S/W</span> — "
+            f"labels mark positions at the latest frame (trail heads), via the live platepar.</p>"
             f"<img src='/tonight_stack.png?v={mt('tonight_stack.png')}'>")
         self.page("Tonight", body, refresh)
 

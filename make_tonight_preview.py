@@ -11,10 +11,15 @@ state so restarts resume cheaply) and writes:
 
 Needs the RMS venv (RMS.Formats, numpy, pillow). One iteration per ~20 s.
 """
-import os, glob, json, time, sys
+import os, glob, json, time, sys, datetime
 import numpy as np
 from PIL import Image
 from RMS.Formats import FFfile
+try:
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from sky_overlay import annotate                # star/planet/Moon labels via the live platepar
+except Exception:
+    annotate = None                                 # overlay is optional — previews must never break
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DATA = os.environ.get("RMS_DATA", "/mnt/nvme/RMS_data")
@@ -90,8 +95,20 @@ def main():
             running = mp.astype(np.uint8) if running is None else np.maximum(running, mp)
             latest_mp = mp; last = f; added += 1
         if added:
-            Image.fromarray(stretch(running, floor_sigma=6.0)).save(STACK_PNG)
-            Image.fromarray(stretch(latest_mp, floor_sigma=3.5)).save(LATEST_PNG)
+            stack_img = Image.fromarray(stretch(running, floor_sigma=6.0))
+            latest_img = Image.fromarray(stretch(latest_mp, floor_sigma=3.5))
+            if annotate is not None:
+                try:
+                    # label at the LAST FF's time: latest sky is exact; on the stack
+                    # the labels ride the trail heads (current positions).
+                    p = last.split("_")
+                    dt = datetime.datetime.strptime(p[2] + p[3], "%Y%m%d%H%M%S")
+                    stack_img = annotate(stack_img, dt)
+                    latest_img = annotate(latest_img, dt)
+                except Exception:
+                    pass                              # bad platepar/ephemeris -> plain images
+            stack_img.save(STACK_PNG)
+            latest_img.save(LATEST_PNG)
             count = ffs.index(last) + 1 if last in ffs else 0
             frames = count * 256
             meta = {"dir": cur, "last": last, "count": count,
