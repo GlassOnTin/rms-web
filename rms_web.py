@@ -17,8 +17,6 @@ PORT = int(os.environ.get("RMS_WEB_PORT", "8080"))
 ASSET_DIR = os.path.dirname(os.path.abspath(__file__))   # neighbours_map.png / neighbours.json live here
 ALLOWED_EXT = {".jpg", ".jpeg", ".png", ".gif", ".mp4", ".txt", ".log"}
 
-STATION_NAME = os.environ.get("STATION_NAME", "Denmead")
-
 def rms_cfg(key, default=None):
     """Read a key (e.g. stationID) from the RMS .config so the header tracks the live station code."""
     path = os.environ.get("RMS_CONFIG", os.path.expanduser("~/source/RMS/.config"))
@@ -30,6 +28,9 @@ def rms_cfg(key, default=None):
     except OSError:
         pass
     return default
+
+# no baked-in identity: env override, else the station code from the RMS .config
+STATION_NAME = os.environ.get("STATION_NAME") or rms_cfg("stationID") or "RMS"
 
 def real_within(root, rel):
     """Resolve root/rel and confirm it stays inside root; else None (anti-traversal)."""
@@ -152,7 +153,8 @@ class H(BaseHTTPRequestHandler):
         host = self.headers.get("Host", "meteor.local").split(":")[0]
         st = nights()
         code = rms_cfg("stationID") or (st[0].split("_")[0] if st else (cur.split("_")[0] if cur != "—" else ""))
-        station = f"{STATION_NAME} ({code})" if code and code != "XX0001" else STATION_NAME
+        station = (f"{STATION_NAME} ({code})" if code and code != "XX0001"
+                   and code != STATION_NAME else STATION_NAME)
         htmlout = PAGE.format(title=html.escape(title), station=html.escape(station),
                               cap=html.escape(cap), capcls=("on" if cap == "active" else "off"),
                               cur=html.escape(cur), host=html.escape(host), body=body, refresh=refresh)

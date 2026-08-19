@@ -17,10 +17,27 @@ from matplotlib.patches import Polygon as MplPoly
 from PIL import Image
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-# Station location — override via env for other stations (defaults: Denmead, Hampshire).
-MLAT = float(os.environ.get("STATION_LAT", "50.90"))
-MLON = float(os.environ.get("STATION_LON", "-1.06"))
-STATION_NAME = os.environ.get("STATION_NAME", "Denmead")
+
+def _rms_cfg(key, default=None):
+    """Fall back to the RMS .config for station identity/position — no coordinates
+    are baked into this repo. Env vars override; RMS_CONFIG sets the config path."""
+    path = os.environ.get("RMS_CONFIG", os.path.expanduser("~/source/RMS/.config"))
+    try:
+        for line in open(path):
+            line = line.split(";", 1)[0]
+            if line.strip().startswith(key + ":"):
+                return line.split(":", 1)[1].strip()
+    except OSError:
+        pass
+    return default
+
+_lat = os.environ.get("STATION_LAT") or _rms_cfg("latitude")
+_lon = os.environ.get("STATION_LON") or _rms_cfg("longitude")
+if _lat is None or _lon is None:
+    sys.exit("Station position unknown: set STATION_LAT/STATION_LON, or point "
+             "RMS_CONFIG at your RMS .config (latitude/longitude).")
+MLAT, MLON = float(_lat), float(_lon)
+STATION_NAME = os.environ.get("STATION_NAME") or _rms_cfg("stationID") or "My station"
 USER_R_KM = float(os.environ.get("STATION_FOOTPRINT_KM", "100.0"))
 KML = "https://globalmeteornetwork.org/data/kml_fov/{}-100km.kml"
 TILE = "https://tile.openstreetmap.org/{z}/{x}/{y}.png"

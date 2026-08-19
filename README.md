@@ -68,9 +68,9 @@ yours (each station links to its GMN weblog):
 # dashboard (defaults: serves /mnt/nvme/RMS_data on :8080)
 RMS_DATA=/mnt/nvme/RMS_data RMS_WEB_PORT=8080 python3 rms_web.py
 
-# generate the neighbours map (defaults to Denmead, Hampshire — override via env)
-STATION_LAT=50.90 STATION_LON=-1.06 STATION_NAME="My Site" \
-  python3 make_neighbours_map.py --refresh
+# generate the neighbours map — position comes from your RMS .config
+# (or set STATION_LAT / STATION_LON / STATION_NAME explicitly)
+RMS_CONFIG=~/source/RMS/.config python3 make_neighbours_map.py --refresh
 ```
 
 Then open `http://<host>:8080/`.
@@ -81,8 +81,9 @@ Then open `http://<host>:8080/`.
 |---|---|---|
 | `RMS_DATA` | `/mnt/nvme/RMS_data` | server — path to RMS data dir |
 | `RMS_WEB_PORT` | `8080` | server — listen port |
-| `STATION_LAT` / `STATION_LON` | Denmead | map — your camera position |
-| `STATION_NAME` | `Denmead` | map — label |
+| `STATION_LAT` / `STATION_LON` | from RMS `.config` | map — your camera position (no default) |
+| `STATION_NAME` | station code from RMS `.config` | map + header label |
+| `RMS_CONFIG` | `~/source/RMS/.config` | fallback source for position/station code |
 | `STATION_FOOTPRINT_KM` | `100` | map — approx ground radius covered at 100 km altitude |
 
 ## Deploy (systemd)

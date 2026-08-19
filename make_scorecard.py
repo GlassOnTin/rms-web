@@ -10,7 +10,7 @@ Caveat: the neighbour figures are multi-station *trajectory* participations (eac
 station detects more single-station meteors than get paired), and the GMN "yesterday"
 daily file is a UTC day, so a UK night straddles a file boundary — treat as indicative.
 """
-import os, re, json, math, glob, urllib.request
+import os, re, sys, json, math, glob, urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 RMS_DATA = os.environ.get("RMS_DATA", "/mnt/nvme/RMS_data")
@@ -30,8 +30,12 @@ def _rms_cfg(key, default=None):
     return default
 
 STATION_CODE = os.environ.get("STATION_CODE") or _rms_cfg("stationID") or "XX0001"
-MLAT = float(os.environ.get("STATION_LAT") or _rms_cfg("latitude") or "50.90")
-MLON = float(os.environ.get("STATION_LON") or _rms_cfg("longitude") or "-1.06")
+_lat = os.environ.get("STATION_LAT") or _rms_cfg("latitude")
+_lon = os.environ.get("STATION_LON") or _rms_cfg("longitude")
+if _lat is None or _lon is None:
+    sys.exit("Station position unknown: set STATION_LAT/STATION_LON, or point "
+             "RMS_CONFIG at your RMS .config (latitude/longitude).")
+MLAT, MLON = float(_lat), float(_lon)
 TRAJ_URL = "https://globalmeteornetwork.org/data/traj_summary_data/daily/traj_summary_yesterday.txt"
 UA = {"User-Agent": "rms-scorecard/1.0 (personal meteor station dashboard)"}
 RADIUS_KM = 120.0
