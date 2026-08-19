@@ -94,7 +94,8 @@ def annotate_stack_aircraft(img, night):
     font = _getfont()
     for p in passes:
         x0, y0, x1, y1 = p["x0"], p["y0"], p["x1"], p["y1"]
-        dr.line([x0, y0, x1, y1], fill=AIR_COL + (70,), width=3)   # faint underline on the real trail
+        # no line: the trail itself is bright in the stack, and ADS-B geometry
+        # (baro altitude) is degrees-off the optics — a drawn line just advertises that
         label = "✈ {} {:,}ft {}".format(p["name"], p["alt"], p["t"][:5])
         mx, my = (x0 + x1) / 2, (y0 + y1) / 2
         # offset the text perpendicular-ish so it doesn't sit on the trail
