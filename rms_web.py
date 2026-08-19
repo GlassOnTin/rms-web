@@ -261,12 +261,19 @@ class H(BaseHTTPRequestHandler):
                                f"<td>{html.escape(p['name'])}</td>"
                                f"<td class=muted>{html.escape(p.get('path',''))}</td></tr>"
                                for p in sp["passes"][-20:][::-1])
-                sathtml = (f"<h3>Satellites through the FOV</h3>"
+                n = len(sp["passes"])
+                latest = sp["passes"][-1]
+                sathtml = (f"<details style='margin:16px 0'>"
+                           f"<summary style='cursor:pointer'><b>Satellites through the FOV</b> "
+                           f"<span class=muted>— {n} pass{'es' if n != 1 else ''} tonight, "
+                           f"latest {html.escape(latest['name'])} at {html.escape(latest['t'])} UTC "
+                           f"(click to expand)</span></summary>"
                            f"<p class=muted>Predicted sunlit passes (TLE propagation) — a streak in the "
-                           f"stack matching one of these times is a satellite, not a meteor.</p>"
+                           f"stack matching one of these times is a satellite, not a meteor. "
+                           f"Showing the most recent 20.</p>"
                            f"<table style='border-spacing:12px 2px'><tr class=muted>"
                            f"<th align=left>time</th><th align=left>satellite</th>"
-                           f"<th align=left>path</th></tr>{rows}</table>")
+                           f"<th align=left>path</th></tr>{rows}</table></details>")
         except Exception:
             pass
         # aircraft pass log (adsb.fi via the preview daemon)
