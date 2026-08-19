@@ -25,9 +25,9 @@ try:
 except Exception:
     annotate_sats = None
 try:
-    from adsb_overlay import annotate_aircraft      # aircraft streaks via adsb.fi + pass log
+    from adsb_overlay import annotate_aircraft, annotate_stack_aircraft  # ADS-B streaks + pass log
 except Exception:
-    annotate_aircraft = None
+    annotate_aircraft = annotate_stack_aircraft = None
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DATA = os.environ.get("RMS_DATA", "/mnt/nvme/RMS_data")
@@ -112,6 +112,8 @@ def main():
                     p = last.split("_")
                     dt = datetime.datetime.strptime(p[2] + p[3], "%Y%m%d%H%M%S")
                     stack_img = annotate(stack_img, dt)
+                    if annotate_stack_aircraft is not None:
+                        stack_img = annotate_stack_aircraft(stack_img, night=cur)
                     latest_img = annotate(latest_img, dt)
                     if annotate_sats is not None:
                         latest_img = annotate_sats(latest_img, dt, night=cur)

@@ -49,7 +49,9 @@ def _enu_azel(pp, lat, lon, alt_m):
     return math.degrees(math.atan2(east, north)) % 360.0, \
            math.degrees(math.atan2(up, horiz))
 
-def _log_pass(night, dt, name, alt_ft, path_str):
+def _log_pass(night, dt, name, alt_ft, path_str, seg=None):
+    """Log a pass; on repeat sightings of the same flight (a pass spans several FF
+    blocks) EXTEND its recorded pixel segment so the log holds the full trail."""
     try:
         d = json.load(open(PASSES_JSON))
     except Exception:
@@ -61,10 +63,46 @@ def _log_pass(night, dt, name, alt_ft, path_str):
         h, m, sec = t.split(":"); return int(h) * 3600 + int(m) * 60 + int(sec)
     for p in d["passes"][-40:]:
         if p["name"] == name and abs(s(p["t"]) - s(ts)) < 240:
+            if seg:                                   # stretch trail to latest block's end
+                p["x1"], p["y1"] = round(seg[2]), round(seg[3])
+                json.dump(d, open(PASSES_JSON, "w"))
             return
-    d["passes"].append({"t": ts, "name": name, "alt": alt_ft, "path": path_str})
+    rec = {"t": ts, "name": name, "alt": alt_ft, "path": path_str}
+    if seg:
+        rec.update(x0=round(seg[0]), y0=round(seg[1]), x1=round(seg[2]), y1=round(seg[3]))
+    d["passes"].append(rec)
     d["passes"] = d["passes"][-200:]
     json.dump(d, open(PASSES_JSON, "w"))
+
+def annotate_stack_aircraft(img, night):
+    """Label tonight's logged aircraft trails on the cumulative stack, in place —
+    the trail is burned into the maxpixel stack exactly where the live overlay saw
+    it, so a historical label at the recorded pixel segment always sits on it."""
+    from PIL import Image as _Image, ImageDraw
+    try:
+        d = json.load(open(PASSES_JSON))
+    except Exception:
+        return img
+    if d.get("dir") != night:
+        return img
+    passes = [p for p in d.get("passes", []) if "x0" in p]
+    if not passes:
+        return img
+    W, H = img.size
+    layer = _Image.new("RGBA", img.size, (0, 0, 0, 0))
+    dr = ImageDraw.Draw(layer)
+    font = _getfont()
+    for p in passes:
+        x0, y0, x1, y1 = p["x0"], p["y0"], p["x1"], p["y1"]
+        dr.line([x0, y0, x1, y1], fill=AIR_COL + (70,), width=3)   # faint underline on the real trail
+        label = "✈ {} {:,}ft {}".format(p["name"], p["alt"], p["t"][:5])
+        mx, my = (x0 + x1) / 2, (y0 + y1) / 2
+        # offset the text perpendicular-ish so it doesn't sit on the trail
+        lx = min(max(mx + 12, 4), W - 8 * len(label) - 6)
+        ly = min(max(my - 24, 4), H - 20)
+        dr.text((lx + 1, ly + 1), label, fill=(0, 0, 0, 220), font=font)
+        dr.text((lx, ly), label, fill=AIR_COL + (230,), font=font)
+    return _Image.alpha_composite(img.convert("RGBA"), layer).convert("RGB")
 
 def annotate_aircraft(img, dt, night=""):
     """Draw predicted aircraft streaks for the FF block starting at UTC dt onto
@@ -123,5 +161,5 @@ def annotate_aircraft(img, dt, night=""):
         if night:
             path_str = "{}→{}".format(ROSE[int(round(azs[0] / 45.0)) % 8],
                                            ROSE[int(round(azs[1] / 45.0)) % 8])
-            _log_pass(night, dt, name, int(alt), path_str)
+            _log_pass(night, dt, name, int(alt), path_str, seg=(x0, y0, x1, y1))
     return img
