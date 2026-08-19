@@ -20,6 +20,10 @@ try:
     from sky_overlay import annotate                # star/planet/Moon labels via the live platepar
 except Exception:
     annotate = None                                 # overlay is optional — previews must never break
+try:
+    from sat_overlay import annotate_sats           # satellite streaks (latest image only) + pass log
+except Exception:
+    annotate_sats = None
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DATA = os.environ.get("RMS_DATA", "/mnt/nvme/RMS_data")
@@ -105,6 +109,8 @@ def main():
                     dt = datetime.datetime.strptime(p[2] + p[3], "%Y%m%d%H%M%S")
                     stack_img = annotate(stack_img, dt)
                     latest_img = annotate(latest_img, dt)
+                    if annotate_sats is not None:
+                        latest_img = annotate_sats(latest_img, dt, night=cur)
                 except Exception:
                     pass                              # bad platepar/ephemeris -> plain images
             stack_img.save(STACK_PNG)

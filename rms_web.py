@@ -252,6 +252,23 @@ class H(BaseHTTPRequestHandler):
         else:
             dethtml = (f"<h3>Detections tonight</h3>"
                        f"<p class=muted>No meteor candidates yet ({nproc} FF blocks screened so far).</p>")
+        # satellite pass log (written by the preview daemon's TLE propagation)
+        sathtml = ""
+        try:
+            sp = _json.load(open(os.path.join(ASSET_DIR, "sat_passes.json")))
+            if sp.get("dir") == d["dir"] and sp.get("passes"):
+                rows = "".join(f"<tr><td>{html.escape(p['t'])} UTC</td>"
+                               f"<td>{html.escape(p['name'])}</td>"
+                               f"<td class=muted>{html.escape(p.get('path',''))}</td></tr>"
+                               for p in sp["passes"][-20:][::-1])
+                sathtml = (f"<h3>Satellites through the FOV</h3>"
+                           f"<p class=muted>Predicted sunlit passes (TLE propagation) — a streak in the "
+                           f"stack matching one of these times is a satellite, not a meteor.</p>"
+                           f"<table style='border-spacing:12px 2px'><tr class=muted>"
+                           f"<th align=left>time</th><th align=left>satellite</th>"
+                           f"<th align=left>path</th></tr>{rows}</table>")
+        except Exception:
+            pass
         body = (
             f"<h2>Tonight &nbsp;{badge}</h2>"
             f"<p class=muted>Night <b>{html.escape(d['dir'])}</b> — auto-refreshes every 20&nbsp;s. "
@@ -263,7 +280,7 @@ class H(BaseHTTPRequestHandler):
             f"<div class=card><b>{d['duration_min']:.0f} min</b><br><span class=muted>captured tonight</span></div>"
             f"<div class=card><b>{ncand}</b><br><span class=muted>meteor candidates (pre-ML)</span></div>"
             f"</div>"
-            + dethtml +
+            + dethtml + sathtml +
             f"<h3>Latest sky (~10 s)</h3>"
             f"<img src='/tonight_latest.png?v={mt('tonight_latest.png')}'>"
             f"<h3>Night so far — cumulative stack</h3>"

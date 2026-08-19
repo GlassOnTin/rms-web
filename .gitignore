@@ -12,3 +12,5 @@ tonight.json
 __pycache__/
 *.pyc
 scorecard.json
+tle_cache/
+sat_passes.json
