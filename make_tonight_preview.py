@@ -24,6 +24,10 @@ try:
     from sat_overlay import annotate_sats           # satellite streaks (latest image only) + pass log
 except Exception:
     annotate_sats = None
+try:
+    from adsb_overlay import annotate_aircraft      # aircraft streaks via adsb.fi + pass log
+except Exception:
+    annotate_aircraft = None
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DATA = os.environ.get("RMS_DATA", "/mnt/nvme/RMS_data")
@@ -111,6 +115,8 @@ def main():
                     latest_img = annotate(latest_img, dt)
                     if annotate_sats is not None:
                         latest_img = annotate_sats(latest_img, dt, night=cur)
+                    if annotate_aircraft is not None:
+                        latest_img = annotate_aircraft(latest_img, dt, night=cur)
                 except Exception:
                     pass                              # bad platepar/ephemeris -> plain images
             stack_img.save(STACK_PNG)

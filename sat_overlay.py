@@ -133,8 +133,12 @@ def annotate_sats(img, dt, night=""):
         except Exception:
             pass
 
-    dr = ImageDraw.Draw(img)
+    # draw on a transparent layer, alpha-composited: streaks must whisper, not shout
+    from PIL import Image as _Image
+    layer = _Image.new("RGBA", img.size, (0, 0, 0, 0))
+    dr = ImageDraw.Draw(layer)
     font = _getfont()
+    drew = False
     for name, sat in cand:
         try:
             pts, azs = [], []
@@ -154,13 +158,15 @@ def annotate_sats(img, dt, night=""):
         # streaks in, whose labels then clamp INTO the frame and float unanchored
         if not ((0 <= x0 <= W and 0 <= y0 <= H) or (0 <= x1 <= W and 0 <= y1 <= H)):
             continue
-        dr.line([x0, y0, x1, y1], fill=SAT_COL, width=2)
+        dr.line([x0, y0, x1, y1], fill=SAT_COL + (55,), width=1)
         lx = min(max(x1 + 5, 4), W - 8 * len(name) - 6)
         ly = min(max(y1 - 8, 4), H - 20)
-        dr.text((lx + 1, ly + 1), name, fill=(0, 0, 0), font=font)
-        dr.text((lx, ly), name, fill=SAT_COL, font=font)
+        dr.text((lx, ly), name, fill=SAT_COL + (135,), font=font)
+        drew = True
         if night:
             path_str = "{}→{}".format(ROSE[int(round(azs[0] / 45.0)) % 8],
                                            ROSE[int(round(azs[1] / 45.0)) % 8])
             _log_pass(night, dt, name, path_str)
+    if drew:
+        img = _Image.alpha_composite(img.convert("RGBA"), layer).convert("RGB")
     return img

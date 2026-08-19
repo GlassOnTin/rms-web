@@ -269,6 +269,24 @@ class H(BaseHTTPRequestHandler):
                            f"<th align=left>path</th></tr>{rows}</table>")
         except Exception:
             pass
+        # aircraft pass log (adsb.fi via the preview daemon)
+        airhtml = ""
+        try:
+            ap = _json.load(open(os.path.join(ASSET_DIR, "air_passes.json")))
+            if ap.get("dir") == d["dir"] and ap.get("passes"):
+                rows = "".join(f"<tr><td>{html.escape(p['t'])} UTC</td>"
+                               f"<td>{html.escape(p['name'])}</td>"
+                               f"<td>{p.get('alt','?'):,} ft</td>"
+                               f"<td class=muted>{html.escape(p.get('path',''))}</td></tr>"
+                               for p in ap["passes"][-20:][::-1])
+                airhtml = (f"<h3>Aircraft through the FOV</h3>"
+                           f"<p class=muted>Live ADS-B (adsb.fi) — beaded/strobed streaks at these "
+                           f"times are aircraft.</p>"
+                           f"<table style='border-spacing:12px 2px'><tr class=muted>"
+                           f"<th align=left>time</th><th align=left>flight</th>"
+                           f"<th align=left>altitude</th><th align=left>path</th></tr>{rows}</table>")
+        except Exception:
+            pass
         body = (
             f"<h2>Tonight &nbsp;{badge}</h2>"
             f"<p class=muted>Night <b>{html.escape(d['dir'])}</b> — auto-refreshes every 20&nbsp;s. "
@@ -280,7 +298,7 @@ class H(BaseHTTPRequestHandler):
             f"<div class=card><b>{d['duration_min']:.0f} min</b><br><span class=muted>captured tonight</span></div>"
             f"<div class=card><b>{ncand}</b><br><span class=muted>meteor candidates (pre-ML)</span></div>"
             f"</div>"
-            + dethtml + sathtml +
+            + dethtml + sathtml + airhtml +
             f"<h3>Latest sky (~10 s)</h3>"
             f"<img src='/tonight_latest.png?v={mt('tonight_latest.png')}'>"
             f"<h3>Night so far — cumulative stack</h3>"

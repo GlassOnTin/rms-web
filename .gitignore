@@ -14,3 +14,4 @@ __pycache__/
 scorecard.json
 tle_cache/
 sat_passes.json
+air_passes.json
