@@ -258,7 +258,7 @@ class H(BaseHTTPRequestHandler):
         sathtml = ""
         try:
             sp = _json.load(open(os.path.join(ASSET_DIR, "sat_passes.json")))
-            if sp.get("dir") == d["dir"] and sp.get("passes"):
+            if sp.get("dir") == d.get("night", d["dir"]) and sp.get("passes"):
                 rows = "".join(f"<tr><td>{html.escape(p['t'])} UTC</td>"
                                f"<td>{html.escape(p['name'])}</td>"
                                f"<td class=muted>{html.escape(p.get('path',''))}</td></tr>"
@@ -282,7 +282,7 @@ class H(BaseHTTPRequestHandler):
         airhtml = ""
         try:
             ap = _json.load(open(os.path.join(ASSET_DIR, "air_passes.json")))
-            if ap.get("dir") == d["dir"] and ap.get("passes"):
+            if ap.get("dir") == d.get("night", d["dir"]) and ap.get("passes"):
                 rows = "".join(f"<tr><td>{html.escape(p['t'])} UTC</td>"
                                f"<td>{html.escape(p['name'])}</td>"
                                f"<td>{p.get('alt','?'):,} ft</td>"

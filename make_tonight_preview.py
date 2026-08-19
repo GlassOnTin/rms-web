@@ -61,6 +61,19 @@ def ff_time(name):
     except Exception:
         return "?"
 
+def night_key(ff_name):
+    """Dusk-anchored night id, so every capture segment of one observing night
+    (which spans UTC midnight, and survives capture restarts that spawn a new
+    directory) shares a key. Reset the stack only when this changes."""
+    try:
+        p = ff_name.split("_")
+        t = datetime.datetime.strptime(p[2] + p[3], "%Y%m%d%H%M%S")
+        if t.hour < 12:                       # after-midnight capture belongs to the prior evening
+            t -= datetime.timedelta(days=1)
+        return t.strftime("%Y%m%d")
+    except Exception:
+        return ff_name[:16]
+
 def load_state():
     try:
         meta = json.load(open(STATE_META))
@@ -79,15 +92,24 @@ def main():
     meta, running = load_state()
     cur = meta.get("dir") if meta else None
     last = meta.get("last", "") if meta else ""
+    cur_night = meta.get("night") if meta else None
+    total = meta.get("count", 0) if meta else 0            # cumulative FF blocks across the night
+    first_ff_name = meta.get("first_ff_name", "") if meta else ""
     latest_mp = None
     while True:
         d = newest_dir()
         if d is None:
             time.sleep(INTERVAL); continue
         name = os.path.basename(d)
-        if name != cur:                       # new night -> reset
-            cur, last, running, latest_mp = name, "", None, None
         ffs = sorted(os.path.basename(f) for f in glob.glob(os.path.join(d, "FF_*.fits")))
+        if not ffs:
+            time.sleep(INTERVAL); continue
+        nk = night_key(ffs[-1])
+        if nk != cur_night:                   # genuinely new observing night -> reset the stack
+            cur_night, running, latest_mp, total, first_ff_name = nk, None, None, 0, ""
+            cur, last = name, ""
+        elif name != cur:                     # same night, new capture segment (restart) -> keep the stack
+            cur, last = name, ""
         now = time.time()
         fresh = [f for f in ffs if f > last]
         added = 0
@@ -101,33 +123,37 @@ def main():
             except Exception:
                 continue                          # partial/unreadable -> retry next loop
             running = mp.astype(np.uint8) if running is None else np.maximum(running, mp)
-            latest_mp = mp; last = f; added += 1
+            latest_mp = mp; last = f; added += 1; total += 1
+            if not first_ff_name:
+                first_ff_name = f
         if added:
             stack_img = Image.fromarray(stretch(running, floor_sigma=6.0))
             latest_img = Image.fromarray(stretch(latest_mp, floor_sigma=3.5))
             if annotate is not None:
                 try:
                     # label at the LAST FF's time: latest sky is exact; on the stack
-                    # the labels ride the trail heads (current positions).
+                    # the labels ride the trail heads (current positions). Overlays key
+                    # on the night id so labels survive same-night capture restarts.
                     p = last.split("_")
                     dt = datetime.datetime.strptime(p[2] + p[3], "%Y%m%d%H%M%S")
                     stack_img = annotate(stack_img, dt)
                     if annotate_stack_aircraft is not None:
-                        stack_img = annotate_stack_aircraft(stack_img, night=cur)
+                        stack_img = annotate_stack_aircraft(stack_img, night=cur_night)
                     latest_img = annotate(latest_img, dt)
                     if annotate_sats is not None:
-                        latest_img = annotate_sats(latest_img, dt, night=cur)
+                        latest_img = annotate_sats(latest_img, dt, night=cur_night)
                     if annotate_aircraft is not None:
-                        latest_img = annotate_aircraft(latest_img, dt, night=cur)
+                        latest_img = annotate_aircraft(latest_img, dt, night=cur_night)
                 except Exception:
                     pass                              # bad platepar/ephemeris -> plain images
             stack_img.save(STACK_PNG)
             latest_img.save(LATEST_PNG)
-            count = ffs.index(last) + 1 if last in ffs else 0
+            count = total
             frames = count * 256
-            meta = {"dir": cur, "last": last, "count": count,
+            meta = {"dir": cur, "last": last, "count": count, "night": cur_night,
+                    "first_ff_name": first_ff_name,
                     "frames": frames, "duration_min": round(frames / 25.0 / 60.0, 1),
-                    "first_ff": ff_time(ffs[0]) if ffs else "?",
+                    "first_ff": ff_time(first_ff_name) if first_ff_name else "?",
                     "last_ff": ff_time(last),
                     "updated": int(now), "last_added": int(now)}
             json.dump(meta, open(JSON_OUT, "w"))
