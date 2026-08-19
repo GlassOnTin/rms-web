@@ -288,12 +288,18 @@ class H(BaseHTTPRequestHandler):
                                f"<td>{p.get('alt','?'):,} ft</td>"
                                f"<td class=muted>{html.escape(p.get('path',''))}</td></tr>"
                                for p in ap["passes"][-20:][::-1])
-                airhtml = (f"<h3>Aircraft through the FOV</h3>"
+                n = len(ap["passes"])
+                latest = ap["passes"][-1]
+                airhtml = (f"<details style='margin:16px 0'>"
+                           f"<summary style='cursor:pointer'><b>Aircraft through the FOV</b> "
+                           f"<span class=muted>— {n} pass{'es' if n != 1 else ''} tonight, "
+                           f"latest {html.escape(latest['name'])} at {html.escape(latest['t'])} UTC "
+                           f"(click to expand)</span></summary>"
                            f"<p class=muted>Live ADS-B (adsb.fi) — beaded/strobed streaks at these "
-                           f"times are aircraft.</p>"
+                           f"times are aircraft. Showing the most recent 20.</p>"
                            f"<table style='border-spacing:12px 2px'><tr class=muted>"
                            f"<th align=left>time</th><th align=left>flight</th>"
-                           f"<th align=left>altitude</th><th align=left>path</th></tr>{rows}</table>")
+                           f"<th align=left>altitude</th><th align=left>path</th></tr>{rows}</table></details>")
         except Exception:
             pass
         body = (

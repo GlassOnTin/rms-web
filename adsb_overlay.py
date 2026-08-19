@@ -92,17 +92,47 @@ def annotate_stack_aircraft(img, night):
     layer = _Image.new("RGBA", img.size, (0, 0, 0, 0))
     dr = ImageDraw.Draw(layer)
     font = _getfont()
-    for p in passes:
+    def text(x, y, s):
+        lx = min(max(x, 4), W - 9 * len(s) - 6)
+        ly = min(max(y, 4), H - 20)
+        dr.text((lx + 1, ly + 1), s, fill=(0, 0, 0, 220), font=font)
+        dr.text((lx, ly), s, fill=AIR_COL + (230,), font=font)
+
+    def clip(x0, y0, x1, y1):
+        """Liang–Barsky: param range of the segment inside the frame, or None."""
+        dx, dy = x1 - x0, y1 - y0
+        t0, t1 = 0.0, 1.0
+        for p, q in ((-dx, x0), (dx, W - x0), (-dy, y0), (dy, H - y0)):
+            if p == 0:
+                if q < 0: return None
+                continue
+            r = q / p
+            if p < 0:
+                if r > t1: return None
+                t0 = max(t0, r)
+            else:
+                if r < t0: return None
+                t1 = min(t1, r)
+        return t0, t1
+
+    # no line: the trail itself is bright in the stack, and ADS-B geometry (baro
+    # altitude) sits degrees off the optics. Label the two points where the trail
+    # crosses the frame border — where the aircraft enters and leaves the image —
+    # entry with the full story, exit with a short tag, so crossing trails stay
+    # attributable.
+    for i, p in enumerate(passes):
         x0, y0, x1, y1 = p["x0"], p["y0"], p["x1"], p["y1"]
-        # no line: the trail itself is bright in the stack, and ADS-B geometry
-        # (baro altitude) is degrees-off the optics — a drawn line just advertises that
-        label = "✈ {} {:,}ft {}".format(p["name"], p["alt"], p["t"][:5])
-        mx, my = (x0 + x1) / 2, (y0 + y1) / 2
-        # offset the text perpendicular-ish so it doesn't sit on the trail
-        lx = min(max(mx + 12, 4), W - 8 * len(label) - 6)
-        ly = min(max(my - 24, 4), H - 20)
-        dr.text((lx + 1, ly + 1), label, fill=(0, 0, 0, 220), font=font)
-        dr.text((lx, ly), label, fill=AIR_COL + (230,), font=font)
+        c = clip(x0, y0, x1, y1)
+        if c is None:
+            continue
+        dx, dy = x1 - x0, y1 - y0
+        pad = 30.0 / max(1.0, (dx * dx + dy * dy) ** 0.5)   # ~30 px inward from the border
+        (ta, tb) = c
+        off = -20 + (i % 3) * 28                            # stagger, so tags sharing a corner miss each other
+        ex, ey = x0 + (ta + pad) * dx, y0 + (ta + pad) * dy
+        qx, qy = x0 + (tb - pad) * dx, y0 + (tb - pad) * dy
+        text(ex + 8, ey + off, "✈ {} {:,}ft {}".format(p["name"], p["alt"], p["t"][:5]))
+        text(qx + 8, qy + off, "✈ {}".format(p["name"].split()[0]))
     return _Image.alpha_composite(img.convert("RGBA"), layer).convert("RGB")
 
 def annotate_aircraft(img, dt, night=""):
