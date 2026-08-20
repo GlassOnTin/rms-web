@@ -113,6 +113,60 @@ def detection_ffs():
     return out
 
 
+def _ff_dt(ff_name):
+    try:
+        p = ff_name.split("_")
+        return datetime.datetime.strptime(p[2] + p[3], "%Y%m%d%H%M%S")
+    except Exception:
+        return None
+
+
+def _aircraft_active(dt):
+    """True while a logged ADS-B pass (air_passes.json) overlaps this block.
+    Aircraft trip the detector along their whole track and their trails CURVE
+    across the wide field, so a straight logged segment can't be corridor-masked
+    away — blocks in an aircraft window are excluded from the detected-meteors
+    stack outright. A meteor in the same block is lost from this PREVIEW only."""
+    if dt is None:
+        return False
+    try:
+        d = json.load(open(os.path.join(HERE, "air_passes.json")))
+    except Exception:
+        return False
+    block_s = dt.hour * 3600 + dt.minute * 60 + dt.second
+    for pa in d.get("passes", []):
+        try:
+            h, m, s = pa["t"].split(":")
+            t0 = int(h) * 3600 + int(m) * 60 + int(s)
+            if -60 <= block_s - t0 <= 360:    # pass start .. extended trail window
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def _mask_satellites(mp, dt):
+    """Zero out predicted satellite corridors (propagated for this exact block,
+    short straight per-block streaks) before the block joins the stack."""
+    if dt is None:
+        return mp
+    try:
+        from sat_overlay import streak_segments
+        segs = streak_segments(dt, size=(mp.shape[1], mp.shape[0]))
+    except Exception:
+        return mp
+    if not segs:
+        return mp
+    from PIL import ImageDraw
+    mask = Image.new("L", (mp.shape[1], mp.shape[0]), 0)
+    dr = ImageDraw.Draw(mask)
+    for (x0, y0, x1, y1) in segs:
+        dr.line([x0, y0, x1, y1], fill=255, width=30)
+    out = mp.copy()
+    out[np.asarray(mask) > 0] = 0
+    return out
+
+
 def load_state():
     try:
         meta = json.load(open(STATE_META))
@@ -182,8 +236,10 @@ def main():
             if not first_ff_name:
                 first_ff_name = f
         # Detected-meteors stack: running max of ONLY the FF blocks the real-time
-        # detector flagged. No cloud gate — a candidate block is included even in
-        # poor sky, since showing the candidate is the whole point.
+        # detector flagged — with known aircraft and satellite corridors masked
+        # out of each block first, else the aircraft that trip the detector along
+        # their whole track dominate and the likely meteors drown. No cloud gate:
+        # a candidate block is the point even in poor sky.
         det_new = 0
         for f in sorted(detection_ffs() - det_merged):
             if night_key(f) != cur_night:
@@ -191,10 +247,15 @@ def main():
             hitpaths = glob.glob(os.path.join(CAP, "*", f))
             if not hitpaths:
                 continue
+            fdt = _ff_dt(f)
+            if _aircraft_active(fdt):
+                det_merged.add(f)             # consumed: an aircraft explains it
+                continue
             try:
                 dmp = FFfile.read(os.path.dirname(hitpaths[0]), f).maxpixel
             except Exception:
                 continue
+            dmp = _mask_satellites(dmp, fdt)
             det_running = dmp.astype(np.uint8) if det_running is None else np.maximum(det_running, dmp)
             det_merged.add(f); det_new += 1
         if det_new and det_running is not None:

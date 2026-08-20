@@ -111,6 +111,39 @@ def _hms_s(t):
     h, m, s = t.split(":")
     return int(h) * 3600 + int(m) * 60 + int(s)
 
+def streak_segments(dt, size=(1456, 1088)):
+    """Predicted in-frame satellite streak segments for the FF block starting at
+    UTC dt -> [(x0, y0, x1, y1)]. Geometry only (no drawing, no pass logging) —
+    used by the tonight-preview daemon to mask known-satellite corridors out of
+    the detected-meteors stack."""
+    import datetime as _dt
+    pp = _platepar()
+    W, H = size
+    segs = []
+    mid = dt + _dt.timedelta(seconds=BLOCK_S / 2)
+    obs = _observer(pp, mid)
+    for name, sat in _load_sats():
+        try:
+            sat.compute(obs)
+            if not (sat.alt > ALT_MIN and not sat.eclipsed):
+                continue
+            pts = []
+            for t in (dt, dt + _dt.timedelta(seconds=BLOCK_S)):
+                o = _observer(pp, t)
+                sat.compute(o)
+                ra, dec = _topo_j2000(sat, o)
+                jd = date2JD(t.year, t.month, t.day, t.hour, t.minute,
+                             t.second + t.microsecond / 1e6)
+                x, y = raDecToXYPP(np.array([ra]), np.array([dec]), jd, pp)
+                pts.append((float(x[0]), float(y[0])))
+            (x0, y0), (x1, y1) = pts
+            if (0 <= x0 <= W and 0 <= y0 <= H) or (0 <= x1 <= W and 0 <= y1 <= H):
+                segs.append((x0, y0, x1, y1))
+        except Exception:
+            continue
+    return segs
+
+
 def annotate_sats(img, dt, night=""):
     """Draw predicted satellite streaks for the FF block starting at UTC dt onto
     `img` (RGB PIL). Also logs FOV passes. Returns img."""

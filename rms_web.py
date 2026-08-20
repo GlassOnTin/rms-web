@@ -371,9 +371,10 @@ class H(BaseHTTPRequestHandler):
             + dethtml + sathtml + airhtml +
             ((f"<h3>Detected meteors — night stack</h3>"
               f"<p class=muted>Max-stack of only the {d.get('det_blocks', 0)} FF block"
-              f"{'s' if d.get('det_blocks', 0) != 1 else ''} the real-time detector flagged — "
-              f"candidate streaks without the night's satellites and planes. Pre-ML; "
-              f"the filter prunes at dawn.</p>"
+              f"{'s' if d.get('det_blocks', 0) != 1 else ''} the real-time detector flagged, with "
+              f"known aircraft (ADS-B) and predicted satellite corridors masked out — what remains "
+              f"is the unexplained streaks, i.e. the likely meteors. Pre-ML; the filter and "
+              f"astrometry adjudicate at dawn.</p>"
               f"<img src='/tonight_detected.png?v={mt('tonight_detected.png')}'>")
              if d.get("det_blocks", 0) > 0 and mt("tonight_detected.png") else "") +
             f"<h3>Latest sky (~10 s)</h3>"
