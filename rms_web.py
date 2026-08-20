@@ -7,7 +7,7 @@ timelapses) over HTTP so they can be viewed in a browser without SSH. Read-only
 (GET only), stdlib-only, path-sanitised to stay within RMS_data. NOT for exposure
 to the public internet — LAN use only.
 """
-import os, re, html, time, urllib.parse, mimetypes, subprocess
+import os, re, html, time, datetime, urllib.parse, mimetypes, subprocess
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 ROOT = os.environ.get("RMS_DATA", "/mnt/nvme/RMS_data")
@@ -102,6 +102,26 @@ def capture_status():
             except OSError:
                 pass
     return state, cur
+
+def capture_window():
+    """Tonight's planned capture window from the newest RMS log: StartCapture
+    logs 'Next start time: ... UTC' (dusk) and '... to start recording for X hrs'
+    (dawn = start + duration). Reuses RMS's own ephemeris decision instead of
+    recomputing sun altitudes here. After dawn the log's last 'Next start time'
+    already points at the following dusk, which is what the waiting state wants."""
+    try:
+        logs = os.path.join(ROOT, "logs")
+        cur = sorted(f for f in os.listdir(logs) if f.startswith("log_") and f.endswith(".log"))[-1]
+        txt = open(os.path.join(logs, cur), errors="replace").read()
+        starts = re.findall(r"Next start time: (\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})", txt)
+        hrs = re.findall(r"to start recording for ([\d.]+) hrs", txt)
+        if not starts:
+            return None, None
+        dusk = datetime.datetime.strptime(starts[-1], "%Y-%m-%d %H:%M:%S")
+        dawn = dusk + datetime.timedelta(hours=float(hrs[-1])) if hrs else None
+        return dusk, dawn
+    except Exception:
+        return None, None
 
 def tonight_detections():
     """Live meteor candidates from the newest RMS log: per-FF 'detected meteors: N'
@@ -320,9 +340,19 @@ class H(BaseHTTPRequestHandler):
                            f"<th align=left>altitude</th><th align=left>path</th></tr>{rows}</table></details>")
         except Exception:
             pass
+        dusk, dawn = capture_window()
+        window = ""
+        if dusk:
+            window = f"Dusk <b>{dusk.strftime('%H:%M')}</b>"
+            if dawn:
+                window += (f" → dawn <b>{dawn.strftime('%H:%M')} UTC</b>"
+                           f" ({(dawn - dusk).total_seconds()/3600:.1f} h)")
+            else:
+                window += " UTC"
+            window = " " + window + "."
         body = (
             f"<h2>Tonight &nbsp;{badge}</h2>"
-            f"<p class=muted>Night <b>{html.escape(d['dir'])}</b> — auto-refreshes every 20&nbsp;s. "
+            f"<p class=muted>Night <b>{html.escape(d['dir'])}</b> — auto-refreshes every 20&nbsp;s.{window} "
             + (f"Last frame {stale}s ago." if live else
                "Capture not currently active; showing the most recent built preview.") + "</p>"
             f"<div style='display:flex;gap:16px;flex-wrap:wrap;margin:10px 0'>"
