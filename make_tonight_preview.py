@@ -135,10 +135,13 @@ def main():
                 continue                          # partial/unreadable -> retry next loop
             # A running max is unforgiving: one bright moonlit-cloud frame stamps
             # its glow onto every pixel for the rest of the night (measured: stack
-            # bg 149/255 after one such passage). Cloudy frames contribute nothing
-            # a meteor hunter wants, so keep them out of the stack; the "latest"
-            # image still shows them, and RMS detection is unaffected.
-            clear = float(np.median(ff.avepixel)) <= 8
+            # bg ~145/255 after one such passage). Gate on the MAXPIXEL median:
+            # drifting haze can keep the avepixel median low while still writing
+            # bright values into the max (each pixel only needs one lit moment in
+            # 10 s). Clear-sky maxpixel median measured ~25-28; haze far above.
+            # The "latest" image still shows skipped frames; detection unaffected.
+            clear = (float(np.median(ff.avepixel)) <= 8
+                     and float(np.median(mp)) <= 34)
             if clear:
                 running = mp.astype(np.uint8) if running is None else np.maximum(running, mp)
             latest_mp = mp; last = f; added += 1; total += 1

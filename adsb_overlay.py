@@ -33,7 +33,12 @@ def _fetch(pp):
         return _cache["ac"], _cache["now"]
     _cache["t"] = t                       # even on failure: don't hammer the API
     try:
-        with urllib.request.urlopen(URL.format(pp.lat, pp.lon), timeout=8) as r:
+        # adsb.fi 403s the default Python-urllib User-Agent (started 2026-08-20,
+        # same policy as their globe/history endpoints) — identify ourselves.
+        req = urllib.request.Request(
+            URL.format(pp.lat, pp.lon),
+            headers={"User-Agent": "rms-web-tonight-preview/1.0 (github.com/GlassOnTin/rms-web)"})
+        with urllib.request.urlopen(req, timeout=8) as r:
             d = json.load(r)
         _cache["ac"] = d.get("aircraft") or []
         _cache["now"] = float(d.get("now", t))
