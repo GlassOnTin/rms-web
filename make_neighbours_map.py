@@ -216,9 +216,13 @@ ax.text(0.995,0.005,"© OpenStreetMap contributors · FOV data: Global Meteor Ne
         bbox=dict(boxstyle="round,pad=0.2", fc="white", ec="none", alpha=0.75))
 plt.tight_layout(); plt.savefig(os.path.join(HERE,"neighbours_map.png"), dpi=110)
 
-out={"lat":MLAT,"lon":MLON,"user_footprint_km":USER_R_KM,"total_uk":len(st),
+# Published coordinates are FUZZED to 2 dp (~1 km) — GMN/UKMON policy: camera
+# operators have faced stalking/harassment, so sites must not be locatable finer
+# than ~1 km from anything this dashboard serves (requested by the GMN UK
+# coordinator, 2026-08-20). Full precision stays in the local .config only.
+out={"lat":round(MLAT,2),"lon":round(MLON,2),"user_footprint_km":USER_R_KM,"total_uk":len(st),
      "within_50":n50,"within_100":n100,"within_200":n200,"prime_30_150":nprime,
      "nearest":[{"code":s["code"],"dist":round(s["dist"],1),"brg":s["brg"],
-                 "lat":round(s["lat"],4),"lon":round(s["lon"],4),"band":s["band"]} for s in st[:20]]}
+                 "lat":round(s["lat"],2),"lon":round(s["lon"],2),"band":s["band"]} for s in st[:20]]}
 json.dump(out, open(os.path.join(HERE,"neighbours.json"),"w"), indent=1)
 print(f"done: within200={n200} prime={nprime}; wrote neighbours_map.png + neighbours.json")
