@@ -284,11 +284,16 @@ class H(BaseHTTPRequestHandler):
                 tm = "{}:{}:{} UTC".format(*tm.groups()) if tm else "—"
                 rows += (f"<tr><td>{tm}</td><td>{n}</td>"
                          f"<td class=muted>{html.escape(ff)}</td></tr>")
-            dethtml = (f"<h3>Detections tonight</h3>"
+            tm_latest = re.search(r"_\d{8}_(\d{2})(\d{2})(\d{2})_", hits[-1][0])
+            tm_latest = "{}:{}:{} UTC".format(*tm_latest.groups()) if tm_latest else "—"
+            dethtml = (f"<details style='margin:16px 0'>"
+                       f"<summary style='cursor:pointer'><b>Detections tonight</b> "
+                       f"<span class=muted>— {ncand} candidate{'s' if ncand != 1 else ''}, "
+                       f"latest at {tm_latest} (click to expand)</span></summary>"
                        f"<p class=muted>Real-time detector candidates ({nproc} FF blocks screened so far). "
                        f"The ML filter and astrometry refine these at dawn — expect the final count to be lower.</p>"
                        f"<table style='border-spacing:12px 2px'><tr class=muted>"
-                       f"<th align=left>time</th><th align=left>n</th><th align=left>FF block</th></tr>{rows}</table>")
+                       f"<th align=left>time</th><th align=left>n</th><th align=left>FF block</th></tr>{rows}</table></details>")
         else:
             dethtml = (f"<h3>Detections tonight</h3>"
                        f"<p class=muted>No meteor candidates yet ({nproc} FF blocks screened so far).</p>")

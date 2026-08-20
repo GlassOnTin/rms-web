@@ -43,15 +43,26 @@ def newest_dir():
     ds = [d for d in glob.glob(os.path.join(CAP, "*")) if os.path.isdir(d)]
     return max(ds, key=os.path.basename) if ds else None
 
-def stretch(arr, floor_sigma=4.0):
+_stretch_stats = {}   # per-role EMA of (bg, nz), so display gain can't pump
+
+def stretch(arr, floor_sigma=4.0, key="stack"):
     # crush the noise floor (a long maxpixel accumulates per-pixel noise peaks) so
     # only real stars/trails/events show, then asinh-stretch what remains.
+    # The scale is anchored to sensor saturation (~220 ADU above floor -> white)
+    # rather than an image percentile: a bright aircraft trail or the Moon used
+    # to own the 99.6th percentile and dim every star to black, and per-frame
+    # percentile jitter under drifting cloud made the brightness oscillate.
     a = arr.astype(np.float32)
     bg = float(np.median(a))
     nz = 1.4826 * float(np.median(np.abs(a - bg))) + 1e-3
+    prev = _stretch_stats.get(key)
+    if prev is not None:
+        bg = 0.3 * bg + 0.7 * prev[0]
+        nz = 0.3 * nz + 0.7 * prev[1]
+    _stretch_stats[key] = (bg, nz)
     x = np.clip(a - (bg + floor_sigma * nz), 0, None)
     s = np.arcsinh(x / (4 * nz))
-    hi = np.percentile(s, 99.6) or 1.0
+    hi = float(np.arcsinh(220.0 / (4 * nz)))
     return np.clip(s / hi * 255, 0, 255).astype("uint8")
 
 def ff_time(name):
@@ -122,13 +133,20 @@ def main():
                 mp = ff.maxpixel
             except Exception:
                 continue                          # partial/unreadable -> retry next loop
-            running = mp.astype(np.uint8) if running is None else np.maximum(running, mp)
+            # A running max is unforgiving: one bright moonlit-cloud frame stamps
+            # its glow onto every pixel for the rest of the night (measured: stack
+            # bg 149/255 after one such passage). Cloudy frames contribute nothing
+            # a meteor hunter wants, so keep them out of the stack; the "latest"
+            # image still shows them, and RMS detection is unaffected.
+            clear = float(np.median(ff.avepixel)) <= 8
+            if clear:
+                running = mp.astype(np.uint8) if running is None else np.maximum(running, mp)
             latest_mp = mp; last = f; added += 1; total += 1
             if not first_ff_name:
                 first_ff_name = f
         if added:
-            stack_img = Image.fromarray(stretch(running, floor_sigma=6.0))
-            latest_img = Image.fromarray(stretch(latest_mp, floor_sigma=3.5))
+            stack_img = Image.fromarray(stretch(running, floor_sigma=6.0, key="stack"))
+            latest_img = Image.fromarray(stretch(latest_mp, floor_sigma=3.5, key="latest"))
             if annotate is not None:
                 try:
                     # label at the LAST FF's time: latest sky is exact; on the stack
