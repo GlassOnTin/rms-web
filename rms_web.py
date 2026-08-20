@@ -217,6 +217,8 @@ class H(BaseHTTPRequestHandler):
             return self.serve_asset("tonight_stack.png", "image/png")
         if u.path == "/tonight_latest.png":
             return self.serve_asset("tonight_latest.png", "image/png")
+        if u.path == "/tonight_detected.png":
+            return self.serve_asset("tonight_detected.png", "image/png")
         if u.path == "/scorecard":
             return self.scorecard()
         self._send(404, "text/plain", b"not found")
@@ -367,6 +369,13 @@ class H(BaseHTTPRequestHandler):
             f"<div class=card><b>{ncand}</b><br><span class=muted>meteor candidates (pre-ML)</span></div>"
             f"</div>"
             + dethtml + sathtml + airhtml +
+            ((f"<h3>Detected meteors — night stack</h3>"
+              f"<p class=muted>Max-stack of only the {d.get('det_blocks', 0)} FF block"
+              f"{'s' if d.get('det_blocks', 0) != 1 else ''} the real-time detector flagged — "
+              f"candidate streaks without the night's satellites and planes. Pre-ML; "
+              f"the filter prunes at dawn.</p>"
+              f"<img src='/tonight_detected.png?v={mt('tonight_detected.png')}'>")
+             if d.get("det_blocks", 0) > 0 and mt("tonight_detected.png") else "") +
             f"<h3>Latest sky (~10 s)</h3>"
             f"<img src='/tonight_latest.png?v={mt('tonight_latest.png')}'>"
             f"<h3>Night so far — cumulative stack</h3>"

@@ -34,8 +34,10 @@ DATA = os.environ.get("RMS_DATA", "/mnt/nvme/RMS_data")
 CAP  = os.path.join(DATA, "CapturedFiles")
 STACK_PNG  = os.path.join(HERE, "tonight_stack.png")
 LATEST_PNG = os.path.join(HERE, "tonight_latest.png")
+DET_PNG    = os.path.join(HERE, "tonight_detected.png")
 JSON_OUT   = os.path.join(HERE, "tonight.json")
 STATE_NPY  = os.path.join(HERE, ".tonight_running.npy")
+STATE_DET_NPY = os.path.join(HERE, ".tonight_det.npy")
 STATE_META = os.path.join(HERE, ".tonight_state.json")
 INTERVAL = int(os.environ.get("TONIGHT_INTERVAL", "20"))
 
@@ -89,6 +91,28 @@ def night_key(ff_name):
     except Exception:
         return ff_name[:16]
 
+import re as _re
+import subprocess as _sp
+
+def detection_ffs():
+    """FF names the real-time detector flagged tonight ('detected meteors: N',
+    N>0), from RMS logs touched in the last 16 h (capture restarts split logs)."""
+    out = set()
+    logs = glob.glob(os.path.join(DATA, "logs", "log_*.log"))
+    cutoff = time.time() - 16 * 3600
+    for lg in logs:
+        try:
+            if os.path.getmtime(lg) < cutoff:
+                continue
+            txt = _sp.run(["grep", "-F", "detected meteors:", lg],
+                          capture_output=True, text=True, timeout=20).stdout
+        except Exception:
+            continue
+        for m in _re.finditer(r"(FF_\S+\.fits) detected meteors: ([1-9]\d*)", txt):
+            out.add(m.group(1))
+    return out
+
+
 def load_state():
     try:
         meta = json.load(open(STATE_META))
@@ -109,6 +133,11 @@ def main():
     last = meta.get("last", "") if meta else ""
     cur_night = meta.get("night") if meta else None
     total = meta.get("count", 0) if meta else 0            # cumulative FF blocks across the night
+    det_merged = set(meta.get("det_ffs", [])) if meta else set()
+    try:
+        det_running = np.load(STATE_DET_NPY) if det_merged else None
+    except Exception:
+        det_running, det_merged = None, set()
     first_ff_name = meta.get("first_ff_name", "") if meta else ""
     latest_mp = None
     while True:
@@ -123,6 +152,7 @@ def main():
         if nk != cur_night:                   # genuinely new observing night -> reset the stack
             cur_night, running, latest_mp, total, first_ff_name = nk, None, None, 0, ""
             cur, last = name, ""
+            det_running, det_merged = None, set()
         elif name != cur:                     # same night, new capture segment (restart) -> keep the stack
             cur, last = name, ""
         now = time.time()
@@ -151,6 +181,34 @@ def main():
             latest_mp = mp; last = f; added += 1; total += 1
             if not first_ff_name:
                 first_ff_name = f
+        # Detected-meteors stack: running max of ONLY the FF blocks the real-time
+        # detector flagged. No cloud gate — a candidate block is included even in
+        # poor sky, since showing the candidate is the whole point.
+        det_new = 0
+        for f in sorted(detection_ffs() - det_merged):
+            if night_key(f) != cur_night:
+                continue
+            hitpaths = glob.glob(os.path.join(CAP, "*", f))
+            if not hitpaths:
+                continue
+            try:
+                dmp = FFfile.read(os.path.dirname(hitpaths[0]), f).maxpixel
+            except Exception:
+                continue
+            det_running = dmp.astype(np.uint8) if det_running is None else np.maximum(det_running, dmp)
+            det_merged.add(f); det_new += 1
+        if det_new and det_running is not None:
+            try:
+                det_img = Image.fromarray(stretch(det_running, floor_sigma=4.0, key="det"))
+                if annotate is not None and last:
+                    p = last.split("_")
+                    dt = datetime.datetime.strptime(p[2] + p[3], "%Y%m%d%H%M%S")
+                    det_img = annotate(det_img, dt)
+                det_img.save(DET_PNG)
+                np.save(STATE_DET_NPY, det_running)
+            except Exception:
+                pass
+
         if added:
             stack_img = Image.fromarray(stretch(running, floor_sigma=6.0, key="stack"))
             latest_img = Image.fromarray(stretch(latest_mp, floor_sigma=3.5, key="latest"))
@@ -180,6 +238,7 @@ def main():
                     "frames": frames, "duration_min": round(frames / 25.0 / 60.0, 1),
                     "first_ff": ff_time(first_ff_name) if first_ff_name else "?",
                     "last_ff": ff_time(last),
+                    "det_ffs": sorted(det_merged), "det_blocks": len(det_merged),
                     "updated": int(now), "last_added": int(now)}
             json.dump(meta, open(JSON_OUT, "w"))
             save_state(meta, running)
