@@ -7,7 +7,7 @@ timelapses) over HTTP so they can be viewed in a browser without SSH. Read-only
 (GET only), stdlib-only, path-sanitised to stay within RMS_data. NOT for exposure
 to the public internet — LAN use only.
 """
-import os, re, html, time, datetime, urllib.parse, mimetypes, subprocess
+import os, re, html, time, glob, datetime, urllib.parse, urllib.request, mimetypes, subprocess
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 ROOT = os.environ.get("RMS_DATA", "/mnt/nvme/RMS_data")
@@ -103,6 +103,55 @@ def capture_status():
                 pass
     return state, cur
 
+_statrep_cache = {"t": 0.0, "present": None}
+
+def ukmon_status():
+    """(label, cls, title) for a UKMON upload-health pill, or None when
+    ukmon-pitools isn't installed (keeps the dashboard generic).
+    Health = freshness of the newest pitools nightly log (ukmon_log_*.log in the
+    RMS log dir; a clean run ends with 'done'), plus a cached daily check that
+    this station appears in UKMON's public network status report."""
+    ini = os.path.expanduser("~/source/ukmon-pitools/ukmon.ini")
+    if not os.path.isfile(ini):
+        return None
+    try:
+        m = re.search(r"LOCATION=(\S+)", open(ini).read())
+    except OSError:
+        return None
+    loc = m.group(1) if m else ""
+    if loc in ("", "NOTCONFIGURED"):
+        return ("awaiting registration", "wait", "SSH key sent; waiting for the UKMON team")
+    logs = glob.glob(os.path.join(ROOT, "logs", "ukmon_log_*.log"))
+    title = "location: " + loc
+    # public network status report — cached, so a slow/failed fetch can't hurt page loads
+    if time.time() - _statrep_cache["t"] > 6 * 3600:
+        _statrep_cache["t"] = time.time()
+        try:
+            req = urllib.request.Request("https://archive.ukmeteors.co.uk/reports/statrep.html",
+                                         headers={"User-Agent": "rms-web/1.0"})
+            page = urllib.request.urlopen(req, timeout=5).read().decode(errors="replace")
+            code = rms_cfg("stationID") or ""
+            _statrep_cache["present"] = bool(code) and code in page
+        except Exception:
+            _statrep_cache["present"] = None
+    if _statrep_cache["present"] is True:
+        title += " · listed in UKMON network report"
+    if not logs:
+        return ("no upload yet", "off", title)
+    newest = max(logs, key=os.path.getmtime)
+    age_h = (time.time() - os.path.getmtime(newest)) / 3600.0
+    when = datetime.datetime.fromtimestamp(os.path.getmtime(newest)).strftime("%H:%M")
+    try:
+        tail = open(newest, errors="replace").read()[-4000:]
+    except OSError:
+        tail = ""
+    if "ERROR" in tail:
+        return ("errors " + when, "off", title + " · see " + os.path.basename(newest))
+    if age_h > 26:
+        return ("stale %dh" % age_h, "off", title)
+    return ("uploaded " + when, "on", title)
+
+
 def capture_window():
     """Tonight's planned capture window from the newest RMS log: StartCapture
     logs 'Next start time: ... UTC' (dusk) and '... to start recording for X hrs'
@@ -162,7 +211,7 @@ pre{{white-space:pre-wrap;background:#0d1220;border:1px solid #1e2740;border-rad
 .hero{{margin:8px 0 4px}} h2{{font-size:15px;margin:24px 0 6px;color:#eaf0fa}}
 </style></head><body>
 <header><h1>🌠 {station} meteor station</h1>
-<span class="pill {capcls}">capture: {cap}</span>
+<span class="pill {capcls}">capture: {cap}</span>{ukmonpill}
 <span class="muted">tonight: {cur}</span>
 <a href="/tonight">tonight</a>
 <a href="/">nights</a>
@@ -192,9 +241,14 @@ class H(BaseHTTPRequestHandler):
         code = rms_cfg("stationID") or (st[0].split("_")[0] if st else (cur.split("_")[0] if cur != "—" else ""))
         station = (f"{STATION_NAME} ({code})" if code and code != "XX0001"
                    and code != STATION_NAME else STATION_NAME)
+        uk = ukmon_status()
+        ukmonpill = ("" if uk is None else
+                     "\n<span class=\"pill {}\" title=\"{}\">ukmon: {}</span>".format(
+                         uk[1], html.escape(uk[2], quote=True), html.escape(uk[0])))
         htmlout = PAGE.format(title=html.escape(title), station=html.escape(station),
                               cap=html.escape(cap),
                               capcls={"live": "on", "waiting for dusk": "wait"}.get(cap, "off"),
+                              ukmonpill=ukmonpill,
                               cur=html.escape(cur), host=html.escape(host), body=body, refresh=refresh)
         self._send(200, "text/html; charset=utf-8", htmlout.encode())
 
