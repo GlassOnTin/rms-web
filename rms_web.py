@@ -7,7 +7,7 @@ timelapses) over HTTP so they can be viewed in a browser without SSH. Read-only
 (GET only), stdlib-only, path-sanitised to stay within RMS_data. NOT for exposure
 to the public internet — LAN use only.
 """
-import os, re, html, urllib.parse, mimetypes, subprocess
+import os, re, html, time, urllib.parse, mimetypes, subprocess
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 ROOT = os.environ.get("RMS_DATA", "/mnt/nvme/RMS_data")
@@ -84,7 +84,24 @@ def capture_status():
         cur = cur[0] if cur else "—"
     except FileNotFoundError:
         cur = "—"
-    return cap, cur
+    # Three-state label: the systemd unit is "active" all day (StartCapture idles
+    # until dusk), so actual liveness comes from FF file age in the newest night
+    # dir — only capture creates FF files (one every ~10 s).
+    if cap != "active":
+        state = "stopped" if cap in ("inactive", "?") else cap
+    else:
+        state = "waiting for dusk"
+        if cur != "—":
+            try:
+                d = os.path.join(ARCHIVED, cur)
+                newest = max((os.path.getmtime(os.path.join(d, f))
+                              for f in os.listdir(d) if f.startswith("FF_") and f.endswith(".fits")),
+                             default=0)
+                if newest and time.time() - newest < 900:
+                    state = "live"
+            except OSError:
+                pass
+    return state, cur
 
 def tonight_detections():
     """Live meteor candidates from the newest RMS log: per-FF 'detected meteors: N'
@@ -114,7 +131,7 @@ a{{color:#7db4ff;text-decoration:none}} a:hover{{text-decoration:underline}}
 header{{padding:14px 20px;background:#111726;border-bottom:1px solid #1e2740;position:sticky;top:0;display:flex;gap:16px;align-items:baseline;flex-wrap:wrap}}
 header h1{{font-size:17px;margin:0;color:#eaf0fa}}
 .pill{{font-size:12px;padding:2px 9px;border-radius:20px;background:#1a2740}}
-.on{{background:#123a1e;color:#7ee29a}} .off{{background:#3a1414;color:#e28b8b}}
+.on{{background:#123a1e;color:#7ee29a}} .off{{background:#3a1414;color:#e28b8b}} .wait{{background:#3a2f14;color:#e2c98b}}
 main{{padding:20px;max-width:1100px;margin:0 auto}}
 .muted{{color:#7c879b;font-size:13px}}
 img{{max-width:100%;border-radius:8px;display:block;background:#000}}
@@ -156,7 +173,8 @@ class H(BaseHTTPRequestHandler):
         station = (f"{STATION_NAME} ({code})" if code and code != "XX0001"
                    and code != STATION_NAME else STATION_NAME)
         htmlout = PAGE.format(title=html.escape(title), station=html.escape(station),
-                              cap=html.escape(cap), capcls=("on" if cap == "active" else "off"),
+                              cap=html.escape(cap),
+                              capcls={"live": "on", "waiting for dusk": "wait"}.get(cap, "off"),
                               cur=html.escape(cur), host=html.escape(host), body=body, refresh=refresh)
         self._send(200, "text/html; charset=utf-8", htmlout.encode())
 
@@ -234,7 +252,7 @@ class H(BaseHTTPRequestHandler):
                              "appears once tonight's capture is under way.</p>", refresh)
         d = _json.load(open(jp))
         stale = int(_t.time()) - d.get("last_added", 0)
-        live = stale < 120 and cap == "active"
+        live = stale < 120 and cap == "live"
         mt = lambda n: int(os.path.getmtime(os.path.join(ASSET_DIR, n))) if os.path.isfile(os.path.join(ASSET_DIR, n)) else 0
         badge = "<span class='pill on'>● live</span>" if live else "<span class='pill off'>idle</span>"
         nproc, hits = tonight_detections()
