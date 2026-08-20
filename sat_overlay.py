@@ -20,8 +20,14 @@ from sky_overlay import _platepar, _getfont, raDecToXYPP, date2JD
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 TLE_DIR = os.path.join(HERE, "tle_cache")
-GROUPS = ("visual", "stations", "starlink")
+GROUPS = ("starlink-sup", "visual", "stations", "starlink", "active")   # dedupe keeps first: sup is freshest
 TLE_URL = "https://celestrak.org/NORAD/elements/gp.php?GROUP={}&FORMAT=tle"
+# Freshly launched batches (Starlink trains!) take days to reach the group
+# files but appear in CelesTrak's supplemental feed almost immediately — an
+# unmasked bright dashed train on 2026-08-20 motivated this. "active" covers
+# OneWeb, rocket bodies and other operational sats missing from "visual".
+SUP_URLS = {"starlink-sup":
+            "https://celestrak.org/NORAD/elements/supplemental/sup-gp.php?FILE=starlink&FORMAT=tle"}
 TLE_MAX_AGE = 18 * 3600
 PASSES_JSON = os.path.join(HERE, "sat_passes.json")
 BLOCK_S = 10.24                      # one FF block
@@ -39,7 +45,7 @@ def _fetch_tles():
             path = os.path.join(TLE_DIR, g + ".tle")
             if os.path.isfile(path) and time.time() - os.path.getmtime(path) < TLE_MAX_AGE:
                 continue
-            req = urllib.request.urlopen(TLE_URL.format(g), timeout=60)
+            req = urllib.request.urlopen(SUP_URLS.get(g) or TLE_URL.format(g), timeout=60)
             data = req.read()
             if len(data) > 500:                       # sanity: don't cache an error page
                 tmp = path + ".tmp"
@@ -65,13 +71,18 @@ def _load_sats():
     key = tuple(os.path.getmtime(p) if os.path.isfile(p) else 0 for p in paths)
     if key != _sats_key:
         sats = []
+        seen = set()                      # NORAD id; groups overlap heavily
         for p in paths:
             if not os.path.isfile(p):
                 continue
             lines = open(p).read().strip().splitlines()
             for i in range(0, len(lines) - 2, 3):
                 try:
+                    cat = lines[i + 1][2:7]
+                    if cat in seen:
+                        continue
                     sats.append((lines[i].strip(), ephem.readtle(lines[i], lines[i+1], lines[i+2])))
+                    seen.add(cat)
                 except Exception:
                     pass
         _sats, _sats_key = sats, key
