@@ -145,6 +145,46 @@ def _aircraft_active(dt):
     return False
 
 
+def _mask_bright_stars(mp, dt):
+    """Zero small discs at the predicted positions of bright stars (and Moon/
+    planets) for this block. In a stack of SPARSE flagged blocks, each block
+    contributes 10 s of every bright star's diurnal drift — Vega alone drew a
+    convincing dashed 'satellite' arc across a whole evening's detected stack
+    (chased through 16k TLEs before the penny dropped). Discs also stop bright
+    stars owning the stretch normalizer and dimming the actual meteors."""
+    if dt is None:
+        return mp
+    try:
+        from sky_overlay import _platepar, STARS, _bodies_j2000
+        from RMS.Astrometry.ApplyAstrometry import raDecToXYPP
+        from RMS.Astrometry.Conversions import date2JD
+        pp = _platepar()
+        jd = date2JD(dt.year, dt.month, dt.day, dt.hour, dt.minute, dt.second)
+        targets = [(s[1], s[2], 10) for s in STARS]
+        try:
+            targets += [(b[1], b[2], 16) for b in _bodies_j2000(dt, pp)]
+        except Exception:
+            pass
+        ras = np.array([t[0] for t in targets]); decs = np.array([t[1] for t in targets])
+        xs, ys = raDecToXYPP(ras, decs, jd, pp)
+    except Exception:
+        return mp
+    from PIL import ImageDraw
+    mask = Image.new("L", (mp.shape[1], mp.shape[0]), 0)
+    dr = ImageDraw.Draw(mask)
+    H, W = mp.shape
+    drew = False
+    for (x, y), (_, _, r) in zip(zip(xs, ys), targets):
+        if -20 <= x <= W + 20 and -20 <= y <= H + 20:
+            dr.ellipse([x - r, y - r, x + r, y + r], fill=255)
+            drew = True
+    if not drew:
+        return mp
+    out = mp.copy()
+    out[np.asarray(mask) > 0] = 0
+    return out
+
+
 def _mask_satellites(mp, dt):
     """Zero out predicted satellite corridors (propagated for this exact block,
     short straight per-block streaks) before the block joins the stack."""
@@ -188,6 +228,7 @@ def main():
     cur_night = meta.get("night") if meta else None
     total = meta.get("count", 0) if meta else 0            # cumulative FF blocks across the night
     det_merged = set(meta.get("det_ffs", [])) if meta else set()
+    det_air = meta.get("det_air", 0) if meta else 0
     try:
         det_running = np.load(STATE_DET_NPY) if det_merged else None
     except Exception:
@@ -206,7 +247,7 @@ def main():
         if nk != cur_night:                   # genuinely new observing night -> reset the stack
             cur_night, running, latest_mp, total, first_ff_name = nk, None, None, 0, ""
             cur, last = name, ""
-            det_running, det_merged = None, set()
+            det_running, det_merged, det_air = None, set(), 0
         elif name != cur:                     # same night, new capture segment (restart) -> keep the stack
             cur, last = name, ""
         now = time.time()
@@ -250,12 +291,24 @@ def main():
             fdt = _ff_dt(f)
             if _aircraft_active(fdt):
                 det_merged.add(f)             # consumed: an aircraft explains it
+                det_air += 1
                 continue
             try:
-                dmp = FFfile.read(os.path.dirname(hitpaths[0]), f).maxpixel
+                dff = FFfile.read(os.path.dirname(hitpaths[0]), f)
+                # maxpixel - avepixel: within one 10 s block a star is static
+                # (max ~= ave, difference ~ scintillation), while a meteor's
+                # flash lives in a few frames (max keeps it, ave dilutes it
+                # 256-fold). This physically removes star trails at EVERY
+                # magnitude — sparse stacking of raw maxpixels dashed every
+                # bright star's diurnal drift across the image (Vega's arc
+                # was chased through 16k satellite TLEs before the penny
+                # dropped). Same transient-only signal RMS feeds its ML crops.
+                dmp = np.clip(dff.maxpixel.astype(np.int16)
+                              - dff.avepixel.astype(np.int16), 0, 255).astype(np.uint8)
             except Exception:
                 continue
             dmp = _mask_satellites(dmp, fdt)
+            dmp = _mask_bright_stars(dmp, fdt)
             det_running = dmp.astype(np.uint8) if det_running is None else np.maximum(det_running, dmp)
             det_merged.add(f); det_new += 1
         if det_new and det_running is not None:
@@ -299,7 +352,8 @@ def main():
                     "frames": frames, "duration_min": round(frames / 25.0 / 60.0, 1),
                     "first_ff": ff_time(first_ff_name) if first_ff_name else "?",
                     "last_ff": ff_time(last),
-                    "det_ffs": sorted(det_merged), "det_blocks": len(det_merged),
+                    "det_ffs": sorted(det_merged), "det_blocks": len(det_merged) - det_air,
+                    "det_air": det_air,
                     "updated": int(now), "last_added": int(now)}
             json.dump(meta, open(JSON_OUT, "w"))
             save_state(meta, running)
