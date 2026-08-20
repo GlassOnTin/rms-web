@@ -43,26 +43,30 @@ def newest_dir():
     ds = [d for d in glob.glob(os.path.join(CAP, "*")) if os.path.isdir(d)]
     return max(ds, key=os.path.basename) if ds else None
 
-_stretch_stats = {}   # per-role EMA of (bg, nz), so display gain can't pump
+_stretch_stats = {}   # per-role EMA of (bg, nz, hi), so display gain can't pump
 
 def stretch(arr, floor_sigma=4.0, key="stack"):
     # crush the noise floor (a long maxpixel accumulates per-pixel noise peaks) so
     # only real stars/trails/events show, then asinh-stretch what remains.
-    # The scale is anchored to sensor saturation (~220 ADU above floor -> white)
-    # rather than an image percentile: a bright aircraft trail or the Moon used
-    # to own the 99.6th percentile and dim every star to black, and per-frame
-    # percentile jitter under drifting cloud made the brightness oscillate.
+    # The normalizer is the 99.6th percentile CLAMPED to the star-brightness
+    # regime (25..220 ADU above floor): unclamped, a bright aircraft trail or
+    # the Moon owns the percentile and dims every star to black, while a dark
+    # clear frame drives it so low that pure saturation-anchoring renders the
+    # single-frame preview black. The normalizer is EMA-smoothed across calls so
+    # per-frame jitter under drifting cloud can't visibly pump the display gain
+    # (the floor stays per-frame: it must adapt immediately when the sky changes).
     a = arr.astype(np.float32)
     bg = float(np.median(a))
     nz = 1.4826 * float(np.median(np.abs(a - bg))) + 1e-3
-    prev = _stretch_stats.get(key)
-    if prev is not None:
-        bg = 0.3 * bg + 0.7 * prev[0]
-        nz = 0.3 * nz + 0.7 * prev[1]
-    _stretch_stats[key] = (bg, nz)
     x = np.clip(a - (bg + floor_sigma * nz), 0, None)
     s = np.arcsinh(x / (4 * nz))
-    hi = float(np.arcsinh(220.0 / (4 * nz)))
+    hi = float(np.percentile(s, 99.6))
+    hi = min(max(hi, float(np.arcsinh(25.0 / (4 * nz)))),
+             float(np.arcsinh(220.0 / (4 * nz))))
+    prev = _stretch_stats.get(key)
+    if prev is not None:
+        hi = 0.3 * hi + 0.7 * prev[2]
+    _stretch_stats[key] = (bg, nz, hi)
     return np.clip(s / hi * 255, 0, 255).astype("uint8")
 
 def ff_time(name):
