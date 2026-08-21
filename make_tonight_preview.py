@@ -324,8 +324,13 @@ def main():
                 pass
 
         if added:
-            stack_img = Image.fromarray(stretch(running, floor_sigma=6.0, key="stack"))
             latest_img = Image.fromarray(stretch(latest_mp, floor_sigma=3.5, key="latest"))
+            # `running` stays None until the first FF passes the clear-sky gate; on an
+            # all-cloud night every block is gated out, so skip the whole-night stack
+            # image rather than crashing on stretch(None) — the latest sky + fresh meta
+            # still update, keeping /tonight "live" through the cloud.
+            stack_img = (Image.fromarray(stretch(running, floor_sigma=6.0, key="stack"))
+                         if running is not None else None)
             if annotate is not None:
                 try:
                     # label at the LAST FF's time: latest sky is exact; on the stack
@@ -333,9 +338,10 @@ def main():
                     # on the night id so labels survive same-night capture restarts.
                     p = last.split("_")
                     dt = datetime.datetime.strptime(p[2] + p[3], "%Y%m%d%H%M%S")
-                    stack_img = annotate(stack_img, dt)
-                    if annotate_stack_aircraft is not None:
-                        stack_img = annotate_stack_aircraft(stack_img, night=cur_night)
+                    if stack_img is not None:
+                        stack_img = annotate(stack_img, dt)
+                        if annotate_stack_aircraft is not None:
+                            stack_img = annotate_stack_aircraft(stack_img, night=cur_night)
                     latest_img = annotate(latest_img, dt)
                     if annotate_sats is not None:
                         latest_img = annotate_sats(latest_img, dt, night=cur_night)
@@ -343,7 +349,8 @@ def main():
                         latest_img = annotate_aircraft(latest_img, dt, night=cur_night)
                 except Exception:
                     pass                              # bad platepar/ephemeris -> plain images
-            stack_img.save(STACK_PNG)
+            if stack_img is not None:
+                stack_img.save(STACK_PNG)
             latest_img.save(LATEST_PNG)
             count = total
             frames = count * 256
