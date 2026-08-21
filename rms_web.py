@@ -8,6 +8,7 @@ timelapses) over HTTP so they can be viewed in a browser without SSH. Read-only
 to the public internet — LAN use only.
 """
 import os, re, html, time, glob, datetime, urllib.parse, urllib.request, mimetypes, subprocess
+import json, threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 ROOT = os.environ.get("RMS_DATA", "/mnt/nvme/RMS_data")
@@ -16,6 +17,13 @@ ARCH_DET = os.path.join(ROOT, "ArchivedFiles")
 PORT = int(os.environ.get("RMS_WEB_PORT", "8080"))
 ASSET_DIR = os.path.dirname(os.path.abspath(__file__))   # neighbours_map.png / neighbours.json live here
 ALLOWED_EXT = {".jpg", ".jpeg", ".png", ".gif", ".mp4", ".txt", ".log"}
+
+# Per-detection media (thumbnails / full frames / FF-reconstruction clips) is
+# produced lazily by detection_media.py under the RMS venv (this server stays
+# stdlib-only) and cached here, keyed on the night's FTPdetectinfo mtime.
+DETCACHE = os.path.join(ASSET_DIR, "detcache")
+DETGEN = os.path.join(ASSET_DIR, "detection_media.py")
+VENV_PY = os.path.expanduser(os.environ.get("RMS_WEB_VENV_PY", "~/vRMS/bin/python3"))
 
 def rms_cfg(key, default=None):
     """Read a key (e.g. stationID) from the RMS .config so the header tracks the live station code."""
@@ -70,6 +78,68 @@ def find_suffix(dirpath, suffix):
 def fileurl(abspath):
     rel = os.path.relpath(abspath, ROOT)
     return "/file?p=" + urllib.parse.quote(rel)
+
+# ---- per-detection media (see detection_media.py) --------------------------
+
+_det_locks, _det_locks_guard = {}, threading.Lock()
+
+def _det_lock(night):
+    with _det_locks_guard:
+        return _det_locks.setdefault(night, threading.Lock())
+
+def _det_gen(mode, night_dir, cache_dir, *args, timeout=300):
+    """Run the venv-side generator; False (never an exception) on any failure so
+    the night page degrades to the montage-only view."""
+    try:
+        r = subprocess.run([VENV_PY, DETGEN, mode, night_dir, cache_dir, *map(str, args)],
+                           capture_output=True, text=True, timeout=timeout)
+        if r.returncode != 0:
+            print("detection_media {} failed: {}".format(mode, r.stderr.strip()[-400:]))
+        return r.returncode == 0
+    except (OSError, subprocess.TimeoutExpired) as e:
+        print("detection_media {} failed: {}".format(mode, e))
+        return False
+
+def det_index(name):
+    """(night_dir, cache_dir, index dict or None) for a night; (re)builds the
+    thumbnail index when missing or when FTPdetectinfo has been reprocessed."""
+    night_dir = real_within(ARCH_DET, name)
+    if not night_dir or not os.path.isdir(night_dir):
+        return None, None, None
+    ftp = os.path.join(night_dir, "FTPdetectinfo_{}.txt".format(os.path.basename(night_dir)))
+    cache_dir = os.path.join(DETCACHE, os.path.basename(night_dir))
+    jp = os.path.join(cache_dir, "detections.json")
+    if not os.path.isfile(ftp):
+        return night_dir, cache_dir, None
+    with _det_lock(name):
+        idx = None
+        if os.path.isfile(jp):
+            try:
+                idx = json.load(open(jp))
+            except (OSError, ValueError):
+                idx = None
+        if idx is None or idx.get("src_mtime") != int(os.path.getmtime(ftp)):
+            idx = None
+            if _det_gen("index", night_dir, cache_dir):
+                try:
+                    idx = json.load(open(jp))
+                except (OSError, ValueError):
+                    idx = None
+    return night_dir, cache_dir, idx
+
+def det_media(name, i, kind):
+    """Absolute path of detection i's 'video'/'full'/'thumb' file, generating
+    video/full on first request. None if the night/index/FF is unavailable."""
+    night_dir, cache_dir, idx = det_index(name)
+    if not idx or not (0 <= i < len(idx.get("detections", []))):
+        return None
+    d = idx["detections"][i]
+    p = os.path.join(cache_dir, d[kind])
+    if not os.path.isfile(p) and kind in ("video", "full") and d.get("has_ff"):
+        with _det_lock(name):
+            if not os.path.isfile(p):
+                _det_gen(kind, night_dir, cache_dir, i)
+    return p if os.path.isfile(p) else None
 
 def capture_status():
     def active(s):
@@ -259,6 +329,11 @@ class H(BaseHTTPRequestHandler):
             return self.home()
         if u.path == "/night":
             return self.night(q.get("d", [""])[0])
+        if u.path == "/det":
+            return self.det(q.get("d", [""])[0], q.get("i", ["-1"])[0])
+        if u.path in ("/detthumb", "/detvid", "/detfull"):
+            kind = {"/detthumb": "thumb", "/detvid": "video", "/detfull": "full"}[u.path]
+            return self.det_asset(q.get("d", [""])[0], q.get("i", ["-1"])[0], kind)
         if u.path == "/file":
             return self.serve_file(q.get("p", [""])[0])
         if u.path == "/neighbours":
@@ -518,6 +593,25 @@ class H(BaseHTTPRequestHandler):
         if not safe or not os.path.isdir(safe):
             return self._send(404, "text/plain", b"no such night")
         parts = [f"<h2>{html.escape(name)}</h2>"]
+        # Per-detection cards: thumbnail links to a detail page with the
+        # FF-reconstruction clip; direct links to the clip and full-res frame.
+        _, _, idx = det_index(name)
+        if idx and idx.get("detections"):
+            v = idx.get("src_mtime", 0)
+            cards = []
+            for d in idx["detections"]:
+                qs = f"d={urllib.parse.quote(name)}&i={d['i']}&v={v}"
+                img = (f"<img src='/detthumb?{qs}' loading=lazy style='height:130px;width:auto'>"
+                       if d.get("has_ff") else "<div class=muted>FF not archived</div>")
+                links = (f"<a href='/det?{qs}'>video</a> · <a href='/detfull?{qs}' target=_blank>full image</a>"
+                         if d.get("has_ff") else "")
+                cards.append(f"<div class=card><a href='/det?{qs}'>{img}</a>"
+                             f"<div style='font-size:12px;margin-top:4px'>{html.escape(d['time'])} · "
+                             f"{d['dur']:.2f}s · {d['nseg']} frames<br>{links}</div></div>")
+            parts.append(f"<h3>Detections ({len(idx['detections'])}) "
+                         f"<span class=muted style='font-size:12px'>— click a thumbnail for the video "
+                         f"snippet (½ speed, rebuilt from the FF block)</span></h3>"
+                         f"<div class=grid>{''.join(cards)}</div>")
         for label, suf in [("Detected meteors", "_DETECTED_thumbs.jpg"),
                            ("Detected meteors — night stack", "_meteors.jpg"),
                            ("Captured stack (whole night)", "_captured_stack.jpg"),
@@ -541,6 +635,77 @@ class H(BaseHTTPRequestHandler):
             except OSError:
                 pass
         self.page(name, "".join(parts))
+
+    def det(self, name, i_s):
+        try:
+            i = int(i_s)
+        except ValueError:
+            return self._send(404, "text/plain", b"bad detection index")
+        _, _, idx = det_index(name)
+        dets = (idx or {}).get("detections", [])
+        if not (0 <= i < len(dets)):
+            return self._send(404, "text/plain", b"no such detection")
+        d = dets[i]
+        v = idx.get("src_mtime", 0)
+        qs = f"d={urllib.parse.quote(name)}&i={i}&v={v}"
+        nav = " · ".join(
+            [f"<a href='/det?d={urllib.parse.quote(name)}&i={i-1}&v={v}'>&larr; prev</a>"] * (i > 0)
+            + [f"<a href='/det?d={urllib.parse.quote(name)}&i={i+1}&v={v}'>next &rarr;</a>"] * (i < len(dets) - 1))
+        media = ("<p class=muted>FF file not archived for this detection — no media available.</p>"
+                 if not d.get("has_ff") else
+                 f"<video controls autoplay muted loop playsinline style='max-width:100%;background:#000'>"
+                 f"<source src='/detvid?{qs}' type=video/mp4></video>"
+                 f"<p class=muted>Clip rebuilt from the FF block (avepixel + maxpixel transients), "
+                 f"played at ½ speed; first load takes a few seconds while it renders. "
+                 f"<a href='/detfull?{qs}' target=_blank>full-resolution maxpixel frame</a></p>")
+        body = (f"<h2><a href='/night?d={urllib.parse.quote(name)}'>{html.escape(name)}</a> — "
+                f"detection {i+1} of {len(dets)}</h2>"
+                f"<p>{html.escape(d['date'])} {html.escape(d['time'])} · {d['dur']:.2f} s · "
+                f"{d['nseg']} frames · <code>{html.escape(d['ff'])}</code></p>"
+                f"{media}<p>{nav}</p>")
+        self.page(f"{name} · det {i+1}", body)
+
+    def det_asset(self, name, i_s, kind):
+        try:
+            i = int(i_s)
+        except ValueError:
+            return self._send(404, "text/plain", b"bad detection index")
+        p = det_media(name, i, kind)
+        if not p:
+            return self._send(404, "text/plain", b"media unavailable")
+        ctype = "video/mp4" if kind == "video" else "image/jpeg"
+        self.serve_binary(p, ctype)
+
+    def serve_binary(self, path, ctype):
+        """Serve a file with minimal single-range support (video seeking)."""
+        try:
+            size = os.path.getsize(path)
+        except OSError:
+            return self._send(404, "text/plain", b"not found")
+        start, end, partial = 0, size - 1, False
+        m = re.match(r"bytes=(\d*)-(\d*)$", self.headers.get("Range") or "")
+        if m and (m.group(1) or m.group(2)):
+            if m.group(1):
+                start = int(m.group(1))
+                if m.group(2):
+                    end = min(int(m.group(2)), size - 1)
+            else:   # suffix range: last N bytes
+                start = max(0, size - int(m.group(2)))
+            if start >= size or start > end:
+                return self._send(416, "text/plain", b"range not satisfiable",
+                                  {"Content-Range": f"bytes */{size}"})
+            partial = True
+        try:
+            with open(path, "rb") as fh:
+                fh.seek(start)
+                data = fh.read(end - start + 1)
+        except OSError:
+            return self._send(404, "text/plain", b"unreadable")
+        hdrs = {"Accept-Ranges": "bytes", "Cache-Control": "max-age=86400",
+                "Content-Length": str(len(data))}
+        if partial:
+            hdrs["Content-Range"] = f"bytes {start}-{end}/{size}"
+        self._send(206 if partial else 200, ctype, data, hdrs)
 
     def serve_file(self, rel):
         ext = os.path.splitext(rel)[1].lower()
