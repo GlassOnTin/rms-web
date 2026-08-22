@@ -91,7 +91,8 @@ def _det_gen(mode, night_dir, cache_dir, *args, timeout=300):
     """Run the venv-side generator; False (never an exception) on any failure so
     the night page degrades to the montage-only view."""
     try:
-        r = subprocess.run([VENV_PY, DETGEN, mode, night_dir, cache_dir, *map(str, args)],
+        # nice: media reconstruction must yield CPU to live capture/detection
+        r = subprocess.run(["nice", "-n", "15", VENV_PY, DETGEN, mode, night_dir, cache_dir, *map(str, args)],
                            capture_output=True, text=True, timeout=timeout)
         if r.returncode != 0:
             print("detection_media {} failed: {}".format(mode, r.stderr.strip()[-400:]))
@@ -139,6 +140,34 @@ def det_media(name, i, kind):
         with _det_lock(name):
             if not os.path.isfile(p):
                 _det_gen(kind, night_dir, cache_dir, i)
+    return p if os.path.isfile(p) else None
+
+def _blk_base(ff):
+    """Cache basename for a flagged block — must match detection_media.blockBase."""
+    return "blk_" + ff.replace("FF_UK00DY_", "").replace("FF_", "").replace(".fits", "")[:20]
+
+def tonight_block_media(ff, kind):
+    """Path to a live flagged-block's thumb/video/full for /tonight, generating
+    lazily from the current capture dir (tonight.json 'dir'). None if unavailable."""
+    if not re.match(r'^FF_[A-Za-z0-9_]+\.fits$', ff or ""):
+        return None
+    jp = os.path.join(ASSET_DIR, "tonight.json")
+    if not os.path.isfile(jp):
+        return None
+    try:
+        cur = json.load(open(jp)).get("dir")
+    except (OSError, ValueError):
+        return None
+    cap_dir = real_within(ARCHIVED, cur or "")
+    if not cap_dir or not os.path.isfile(os.path.join(cap_dir, ff)):
+        return None
+    cache_dir = os.path.join(DETCACHE, os.path.basename(cap_dir))
+    suffix = {"thumb": "_thumb.jpg", "video": ".mp4", "full": "_full.jpg"}[kind]
+    p = os.path.join(cache_dir, _blk_base(ff) + suffix)
+    if not os.path.isfile(p):
+        with _det_lock("tblk:" + ff):
+            if not os.path.isfile(p):
+                _det_gen("block" + kind, cap_dir, cache_dir, ff)
     return p if os.path.isfile(p) else None
 
 def capture_status():
@@ -334,6 +363,14 @@ class H(BaseHTTPRequestHandler):
         if u.path in ("/detthumb", "/detvid", "/detfull"):
             kind = {"/detthumb": "thumb", "/detvid": "video", "/detfull": "full"}[u.path]
             return self.det_asset(q.get("d", [""])[0], q.get("i", ["-1"])[0], kind)
+        if u.path == "/tdet":
+            return self.tdet(q.get("ff", [""])[0])
+        if u.path in ("/tdetthumb", "/tdetvid", "/tdetfull"):
+            kind = {"/tdetthumb": "thumb", "/tdetvid": "video", "/tdetfull": "full"}[u.path]
+            p = tonight_block_media(q.get("ff", [""])[0], kind)
+            if not p:
+                return self._send(404, "text/plain", b"media unavailable")
+            return self.serve_binary(p, "video/mp4" if kind == "video" else "image/jpeg")
         if u.path == "/file":
             return self.serve_file(q.get("p", [""])[0])
         if u.path == "/neighbours":
@@ -409,22 +446,23 @@ class H(BaseHTTPRequestHandler):
         nproc, hits = tonight_detections()
         ncand = sum(n for _, n in hits)
         if hits:
-            rows = ""
-            for ff, n in hits[-20:][::-1]:   # newest first, cap at 20
+            # clickable grid: each flagged block -> detail page with a video snippet
+            # (same idea as /night, but keyed on the FF block since tonight has no
+            # FTPdetectinfo yet). Newest first.
+            cards = ""
+            for ff, n in hits[-24:][::-1]:
                 tm = re.search(r"_\d{8}_(\d{2})(\d{2})(\d{2})_", ff)
-                tm = "{}:{}:{} UTC".format(*tm.groups()) if tm else "—"
-                rows += (f"<tr><td>{tm}</td><td>{n}</td>"
-                         f"<td class=muted>{html.escape(ff)}</td></tr>")
-            tm_latest = re.search(r"_\d{8}_(\d{2})(\d{2})(\d{2})_", hits[-1][0])
-            tm_latest = "{}:{}:{} UTC".format(*tm_latest.groups()) if tm_latest else "—"
-            dethtml = (f"<details style='margin:16px 0'>"
-                       f"<summary style='cursor:pointer'><b>Detections tonight</b> "
-                       f"<span class=muted>— {ncand} candidate{'s' if ncand != 1 else ''}, "
-                       f"latest at {tm_latest} (click to expand)</span></summary>"
-                       f"<p class=muted>Real-time detector candidates ({nproc} FF blocks screened so far). "
-                       f"The ML filter and astrometry refine these at dawn — expect the final count to be lower.</p>"
-                       f"<table style='border-spacing:12px 2px'><tr class=muted>"
-                       f"<th align=left>time</th><th align=left>n</th><th align=left>FF block</th></tr>{rows}</table></details>")
+                tmstr = "{}:{}:{} UTC".format(*tm.groups()) if tm else "—"
+                qs = "ff=" + urllib.parse.quote(ff)
+                cards += (f"<div class=card><a href='/tdet?{qs}'>"
+                          f"<img src='/tdetthumb?{qs}' loading=lazy style='height:120px;width:auto'></a>"
+                          f"<div style='font-size:12px;margin-top:4px'>{tmstr} · {n} seg<br>"
+                          f"<a href='/tdet?{qs}'>video</a> · <a href='/tdetfull?{qs}' target=_blank>full</a></div></div>")
+            dethtml = (f"<h3>Detections tonight ({len(hits)}) "
+                       f"<span class=muted style='font-size:12px'>— live candidates ({nproc} FF blocks "
+                       f"screened); click for the video snippet. ML filter + astrometry refine at dawn, "
+                       f"so the final count is usually lower.</span></h3>"
+                       f"<div class=grid>{cards}</div>")
         else:
             dethtml = (f"<h3>Detections tonight</h3>"
                        f"<p class=muted>No meteor candidates yet ({nproc} FF blocks screened so far).</p>")
@@ -664,6 +702,23 @@ class H(BaseHTTPRequestHandler):
                 f"{d['nseg']} frames · <code>{html.escape(d['ff'])}</code></p>"
                 f"{media}<p>{nav}</p>")
         self.page(f"{name} · det {i+1}", body)
+
+    def tdet(self, ff):
+        """Detail page for a live /tonight flagged block: video snippet + full frame."""
+        if not tonight_block_media(ff, "thumb"):
+            return self._send(404, "text/plain", b"no such detection block")
+        qs = "ff=" + urllib.parse.quote(ff)
+        tm = re.search(r"_\d{8}_(\d{2})(\d{2})(\d{2})_", ff)
+        tmstr = "{}:{}:{} UTC".format(*tm.groups()) if tm else "—"
+        body = (f"<h2><a href='/tonight'>Tonight</a> — detection block {tmstr}</h2>"
+                f"<p class=muted><code>{html.escape(ff)}</code> · live candidate "
+                f"(ML filter + astrometry refine at dawn)</p>"
+                f"<video controls autoplay muted loop playsinline style='max-width:100%;background:#000'>"
+                f"<source src='/tdetvid?{qs}' type=video/mp4></video>"
+                f"<p class=muted>Full 10 s block rebuilt from the FF (avepixel + maxpixel transients), "
+                f"½ speed; first load takes a few seconds to render. "
+                f"<a href='/tdetfull?{qs}' target=_blank>full-resolution maxpixel frame</a></p>")
+        self.page("Tonight · " + tmstr, body)
 
     def det_asset(self, name, i_s, kind):
         try:

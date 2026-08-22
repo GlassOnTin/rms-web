@@ -173,6 +173,65 @@ def writeVideo(night_dir, cache_dir, det_index):
     os.replace(out + ".tmp.mp4", out)
 
 
+# ---- per-BLOCK media for the live /tonight page --------------------------
+# The in-progress night has no FTPdetectinfo yet (it's written at dawn), so the
+# detection unit here is the whole FF block the real-time detector flagged
+# (tonight.json "det_ffs"). These mirror the per-meteor /night media but key on
+# the FF name and reconstruct/crop the whole 10 s block.
+
+def blockBase(ff_name):
+    """Stable cache basename for a flagged block, e.g. 'blk_20260821_231033_504'."""
+    return "blk_" + ff_name.replace("FF_UK00DY_", "").replace("FF_", "").replace(".fits", "")[:20]
+
+
+def blockResidual(ff):
+    """maxpixel-avepixel: the transient (meteor) signal, star-drift removed."""
+    return np.clip(ff.maxpixel.astype(np.int16) - ff.avepixel.astype(np.int16), 0, 255).astype(np.uint8)
+
+
+def writeBlockThumb(cap_dir, cache_dir, ff_name, thumb_h=160):
+    ff = readFF(cap_dir, ff_name)
+    resid = blockResidual(ff)
+    lo = float(np.percentile(resid, 50.0))
+    hi = max(float(np.percentile(resid, 99.9)), lo + 20.0)
+    lut = np.clip((np.arange(256, dtype=np.float32) - lo)*255.0/(hi - lo), 0, 255).astype(np.uint8)
+    img = Image.fromarray(lut[resid])
+    os.makedirs(cache_dir, exist_ok=True)
+    img = img.resize((max(1, int(img.width*thumb_h/img.height)), thumb_h), Image.LANCZOS)
+    img.save(os.path.join(cache_dir, blockBase(ff_name) + "_thumb.jpg"), quality=88)
+
+
+def writeBlockFull(cap_dir, cache_dir, ff_name):
+    ff = readFF(cap_dir, ff_name)
+    lut = stretchLUT(ff)
+    Image.fromarray(lut[ff.maxpixel]).save(
+        os.path.join(cache_dir, blockBase(ff_name) + "_full.jpg"), quality=90)
+
+
+def writeBlockVideo(cap_dir, cache_dir, ff_name):
+    ff = readFF(cap_dir, ff_name)
+    lut = stretchLUT(ff)
+    n = ff.nframes if getattr(ff, "nframes", 0) else 256
+    h, w = ff.maxpixel.shape
+    out = os.path.join(cache_dir, blockBase(ff_name) + ".mp4")
+    os.makedirs(cache_dir, exist_ok=True)
+    cmd = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+           "-f", "rawvideo", "-pixel_format", "gray",
+           "-video_size", "{}x{}".format(w, h), "-framerate", str(VIDEO_FPS), "-i", "-",
+           "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+           "-pix_fmt", "yuv420p", "-movflags", "+faststart", out + ".tmp.mp4"]
+    proc = subprocess.Popen(cmd, stdin=subprocess.PIPE)
+    for i in range(n):                       # whole block: meteor sweeps through, ½ speed
+        frame = ff.avepixel.copy()
+        m = ff.maxframe == i
+        frame[m] = ff.maxpixel[m]
+        proc.stdin.write(lut[frame].tobytes())
+    proc.stdin.close()
+    if proc.wait() != 0:
+        raise RuntimeError("ffmpeg failed for {}".format(out))
+    os.replace(out + ".tmp.mp4", out)
+
+
 if __name__ == "__main__":
     mode, night_dir, cache_dir = sys.argv[1], sys.argv[2], sys.argv[3]
     if mode == "index":
@@ -181,5 +240,11 @@ if __name__ == "__main__":
         writeFull(night_dir, cache_dir, int(sys.argv[4]))
     elif mode == "video":
         writeVideo(night_dir, cache_dir, int(sys.argv[4]))
+    elif mode == "blockthumb":
+        writeBlockThumb(night_dir, cache_dir, sys.argv[4])
+    elif mode == "blockfull":
+        writeBlockFull(night_dir, cache_dir, sys.argv[4])
+    elif mode == "blockvideo":
+        writeBlockVideo(night_dir, cache_dir, sys.argv[4])
     else:
         sys.exit("unknown mode: " + mode)
