@@ -9,6 +9,7 @@ tonight.json
 .tonight_running.npy
 .tonight_det.npy
 .tonight_state.json
+.tonight_rebuild_request
 
 # python
 __pycache__/

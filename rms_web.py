@@ -389,6 +389,19 @@ class H(BaseHTTPRequestHandler):
             return self.scorecard()
         self._send(404, "text/plain", b"not found")
 
+    def do_POST(self):
+        u = urllib.parse.urlparse(self.path)
+        # Request a full rebuild of tonight's cumulative stack. The web app is read-only, so
+        # rather than orchestrating the daemon (it can't sudo/restart it), it drops a flag file
+        # that the preview daemon picks up on its next loop and rebuilds in-process.
+        if u.path == "/rebuild_stack":
+            try:
+                open(os.path.join(ASSET_DIR, ".tonight_rebuild_request"), "w").close()
+            except OSError:
+                pass
+            return self._send(303, "text/plain", b"", extra={"Location": "/tonight"})
+        self._send(404, "text/plain", b"not found")
+
     def scorecard(self):
         import json as _json
         jp = os.path.join(ASSET_DIR, "scorecard.json")
@@ -519,6 +532,25 @@ class H(BaseHTTPRequestHandler):
                            f"<th align=left>altitude</th><th align=left>path</th></tr>{rows}</table></details>")
         except Exception:
             pass
+        # Gated rebuild control: only when tonight spans >1 capture segment (a restart/reboot,
+        # so the incremental stack may be missing frames). POST + confirm keeps the otherwise
+        # read-only dashboard from triggering it accidentally; the daemon does the work.
+        flag = os.path.join(ASSET_DIR, ".tonight_rebuild_request")
+        if os.path.isfile(flag):
+            rebuild_ctrl = ("<p class=muted style='margin:10px 0'>⏳ Rebuild queued — the "
+                            "cumulative stack will refresh in a minute or two.</p>")
+        elif d.get("segments", 1) > 1:
+            rebuild_ctrl = (
+                f"<form method=post action='/rebuild_stack' style='margin:10px 0' "
+                f"onsubmit=\"return confirm('Rebuild tonight\\u2019s cumulative stack from all "
+                f"{d.get('segments')} capture segments? Re-reads the whole night; takes a minute or two.')\">"
+                f"<button type=submit style='padding:6px 12px;cursor:pointer;background:#1b2735;"
+                f"color:#cfe3ff;border:1px solid #2f4a63;border-radius:6px;font-size:13px'>"
+                f"↻ Rebuild stack</button> "
+                f"<span class=muted style='font-size:12px'>capture restarted {d.get('segments')}× "
+                f"tonight — rebuild to include frames from before the restart(s)</span></form>")
+        else:
+            rebuild_ctrl = ""
         dusk, dawn = capture_window()
         window = ""
         if dusk:
@@ -553,6 +585,7 @@ class H(BaseHTTPRequestHandler):
             f"<h3>Latest sky (~10 s)</h3>"
             f"<img src='/tonight_latest.png?v={mt('tonight_latest.png')}'>"
             f"<h3>Night so far — cumulative stack</h3>"
+            + rebuild_ctrl
             + ((f"<p class=muted>Every star trail, satellite and meteor caught since "
                 f"{html.escape(d['first_ff'])} (through {html.escape(d['last_ff'])}). Live preview — "
                 f"RMS builds the clean final stack at dawn. Overlay: <span style='color:#78c8ff'>stars</span>, "

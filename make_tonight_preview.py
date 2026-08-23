@@ -39,7 +39,13 @@ JSON_OUT   = os.path.join(HERE, "tonight.json")
 STATE_NPY  = os.path.join(HERE, ".tonight_running.npy")
 STATE_DET_NPY = os.path.join(HERE, ".tonight_det.npy")
 STATE_META = os.path.join(HERE, ".tonight_state.json")
+REBUILD_FLAG = os.path.join(HERE, ".tonight_rebuild_request")   # touched by the /tonight rebuild button
 INTERVAL = int(os.environ.get("TONIGHT_INTERVAL", "20"))
+
+# Clear-sky gate: a frame enters the cumulative stack only if the sky is dark (low avepixel
+# median) AND not hazy/moonlit (maxpixel median below the intrinsic ~30-35 ADU sensor floor
+# plus margin). See the gate comment in main().
+CLEAR_AVE_MAX, CLEAR_MAXPIX_MED = 8.0, 45.0
 
 def newest_dir():
     ds = [d for d in glob.glob(os.path.join(CAP, "*")) if os.path.isdir(d)]
@@ -90,6 +96,52 @@ def night_key(ff_name):
         return t.strftime("%Y%m%d")
     except Exception:
         return ff_name[:16]
+
+def night_segments(cur_night):
+    """All capture dirs (segments) belonging to one dusk-anchored observing night. Capture
+    restarts/reboots split a night into several dirs; >1 means the incremental stack may be
+    missing frames from before a restart (that's when the /tonight rebuild button appears)."""
+    segs = []
+    for d in glob.glob(os.path.join(CAP, "*")):
+        if not os.path.isdir(d):
+            continue
+        try:
+            p = os.path.basename(d).split("_")     # STATION_YYYYMMDD_HHMMSS_micros
+            t = datetime.datetime.strptime(p[1] + p[2], "%Y%m%d%H%M%S")
+            if t.hour < 12:
+                t -= datetime.timedelta(days=1)
+            if t.strftime("%Y%m%d") == cur_night:
+                segs.append(d)
+        except Exception:
+            continue
+    return sorted(segs)
+
+def rebuild_running(cur_night):
+    """Rebuild the whole-night cumulative maxpixel stack from EVERY FF of the observing night,
+    across all capture segments, applying the clear-sky gate. Used when a restart/reboot has
+    left the incremental stack incomplete (the live loop never revisits earlier/skipped FFs).
+    Returns (running, latest_mp, total, first_ff_name, last)."""
+    ffs = []
+    for d in night_segments(cur_night):
+        for f in sorted(os.path.basename(x) for x in glob.glob(os.path.join(d, "FF_*.fits"))):
+            if night_key(f) == cur_night:
+                ffs.append((f, d))
+    ffs.sort()
+    running = latest = None
+    total = 0
+    first = last = ""
+    for f, d in ffs:
+        try:
+            ff = FFfile.read(d, f); mp = ff.maxpixel
+        except Exception:
+            continue                                # corrupted (e.g. FF cut mid-write by a reboot)
+        latest = mp
+        if float(np.median(ff.avepixel)) <= CLEAR_AVE_MAX and float(np.median(mp)) <= CLEAR_MAXPIX_MED:
+            running = mp.astype(np.uint8) if running is None else np.maximum(running, mp)
+        if not first:
+            first = f
+        last = f; total += 1
+    return running, latest, total, first, last
 
 import re as _re
 import subprocess as _sp
@@ -250,6 +302,21 @@ def main():
             det_running, det_merged, det_air = None, set(), 0
         elif name != cur:                     # same night, new capture segment (restart) -> keep the stack
             cur, last = name, ""
+        # /tonight rebuild button: re-derive the whole-night stack from every segment's FFs
+        # (recovers frames missed before a restart/reboot or a gate change).
+        force_render = False
+        if os.path.exists(REBUILD_FLAG):
+            try:
+                os.remove(REBUILD_FLAG)
+            except OSError:
+                pass
+            try:
+                r, lmp, tot, ff1, lst = rebuild_running(cur_night)
+                if r is not None:
+                    running, latest_mp, total, first_ff_name, last = r, lmp, tot, ff1, lst
+                    force_render = True
+            except Exception:
+                pass
         now = time.time()
         fresh = [f for f in ffs if f > last]
         added = 0
@@ -273,8 +340,8 @@ def main():
             # higher (50-150+), so 45 still cleanly rejects it. (The earlier 34 was ~1 ADU
             # under the real floor, so it gated out genuinely clear nights and the cumulative
             # stack never built.) The "latest" image still shows skipped frames; detection unaffected.
-            clear = (float(np.median(ff.avepixel)) <= 8
-                     and float(np.median(mp)) <= 45)
+            clear = (float(np.median(ff.avepixel)) <= CLEAR_AVE_MAX
+                     and float(np.median(mp)) <= CLEAR_MAXPIX_MED)
             if clear:
                 running = mp.astype(np.uint8) if running is None else np.maximum(running, mp)
             latest_mp = mp; last = f; added += 1; total += 1
@@ -327,7 +394,7 @@ def main():
             except Exception:
                 pass
 
-        if added:
+        if (added or force_render) and latest_mp is not None:
             latest_img = Image.fromarray(stretch(latest_mp, floor_sigma=3.5, key="latest"))
             # `running` stays None until the first FF passes the clear-sky gate; on an
             # all-cloud night every block is gated out, so skip the whole-night stack
@@ -360,6 +427,9 @@ def main():
             frames = count * 256
             meta = {"dir": cur, "last": last, "count": count, "night": cur_night,
                     "first_ff_name": first_ff_name,
+                    # number of capture segments tonight (>1 => a restart/reboot split the
+                    # night; the /tonight rebuild button appears so missed frames can be recovered)
+                    "segments": len(night_segments(cur_night)),
                     # True only once a clear-sky frame has entered TONIGHT's stack (running
                     # resets to None at the night rollover). The web guards the cumulative-
                     # stack image on this so a cloudy night never shows the previous night's
