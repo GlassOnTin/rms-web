@@ -4,8 +4,10 @@ neighbours.json
 osm_cache/
 tonight_stack.png
 tonight_latest.png
+tonight_detected.png
 tonight.json
 .tonight_running.npy
+.tonight_det.npy
 .tonight_state.json
 
 # python

@@ -356,6 +356,11 @@ def main():
             frames = count * 256
             meta = {"dir": cur, "last": last, "count": count, "night": cur_night,
                     "first_ff_name": first_ff_name,
+                    # True only once a clear-sky frame has entered TONIGHT's stack (running
+                    # resets to None at the night rollover). The web guards the cumulative-
+                    # stack image on this so a cloudy night never shows the previous night's
+                    # stale stack.png under tonight's caption.
+                    "stack_built": running is not None,
                     "frames": frames, "duration_min": round(frames / 25.0 / 60.0, 1),
                     "first_ff": ff_time(first_ff_name) if first_ff_name else "?",
                     "last_ff": ff_time(last),

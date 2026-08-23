@@ -548,13 +548,19 @@ class H(BaseHTTPRequestHandler):
             f"<h3>Latest sky (~10 s)</h3>"
             f"<img src='/tonight_latest.png?v={mt('tonight_latest.png')}'>"
             f"<h3>Night so far — cumulative stack</h3>"
-            f"<p class=muted>Every star trail, satellite and meteor caught since "
-            f"{html.escape(d['first_ff'])} (through {html.escape(d['last_ff'])}). Live preview — "
-            f"RMS builds the clean final stack at dawn. Overlay: <span style='color:#78c8ff'>stars</span>, "
-            f"<span style='color:#ffd25a'>planets</span>, <span style='color:#fff'>Moon/NCP</span>, "
-            f"<span style='color:#c878dc'>ecliptic</span>, <span style='color:#ff8c64'>N/E/S/W</span> — "
-            f"labels mark positions at the latest frame (trail heads), via the live platepar.</p>"
-            f"<img src='/tonight_stack.png?v={mt('tonight_stack.png')}'>")
+            + ((f"<p class=muted>Every star trail, satellite and meteor caught since "
+                f"{html.escape(d['first_ff'])} (through {html.escape(d['last_ff'])}). Live preview — "
+                f"RMS builds the clean final stack at dawn. Overlay: <span style='color:#78c8ff'>stars</span>, "
+                f"<span style='color:#ffd25a'>planets</span>, <span style='color:#fff'>Moon/NCP</span>, "
+                f"<span style='color:#c878dc'>ecliptic</span>, <span style='color:#ff8c64'>N/E/S/W</span> — "
+                f"labels mark positions at the latest frame (trail heads), via the live platepar.</p>"
+                f"<img src='/tonight_stack.png?v={mt('tonight_stack.png')}'>")
+               # Guard on stack_built (set by the preview builder) so a cloudy night — when
+               # no clear frame has entered tonight's stack — never shows the previous night's
+               # stale stack.png under tonight's caption.
+               if d.get("stack_built") and mt("tonight_stack.png") else
+               f"<p class=muted>No clear-sky frames in tonight's stack yet — the cumulative "
+               f"stack appears once the sky clears.</p>"))
         self.page("Tonight", body, refresh)
 
     def serve_asset(self, name, ctype):
