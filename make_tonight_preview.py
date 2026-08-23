@@ -267,10 +267,14 @@ def main():
             # bg ~145/255 after one such passage). Gate on the MAXPIXEL median:
             # drifting haze can keep the avepixel median low while still writing
             # bright values into the max (each pixel only needs one lit moment in
-            # 10 s). Clear-sky maxpixel median measured ~25-28; haze far above.
-            # The "latest" image still shows skipped frames; detection unaffected.
+            # 10 s). This camera's raw-pipeline CLEAR-sky maxpixel median is ~30-35 ADU
+            # (intrinsic heavy-tailed sensor read noise, per the sensitivity study), so the
+            # threshold sits above that at 45; haze/moonlight pushes the maxpixel median far
+            # higher (50-150+), so 45 still cleanly rejects it. (The earlier 34 was ~1 ADU
+            # under the real floor, so it gated out genuinely clear nights and the cumulative
+            # stack never built.) The "latest" image still shows skipped frames; detection unaffected.
             clear = (float(np.median(ff.avepixel)) <= 8
-                     and float(np.median(mp)) <= 34)
+                     and float(np.median(mp)) <= 45)
             if clear:
                 running = mp.astype(np.uint8) if running is None else np.maximum(running, mp)
             latest_mp = mp; last = f; added += 1; total += 1
