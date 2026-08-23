@@ -458,14 +458,19 @@ class H(BaseHTTPRequestHandler):
                           f"<img src='/tdetthumb?{qs}' loading=lazy style='height:120px;width:auto'></a>"
                           f"<div style='font-size:12px;margin-top:4px'>{tmstr} · {n} seg<br>"
                           f"<a href='/tdet?{qs}'>video</a> · <a href='/tdetfull?{qs}' target=_blank>full</a></div></div>")
-            dethtml = (f"<h3>Detections tonight ({len(hits)}) "
-                       f"<span class=muted style='font-size:12px'>— live candidates ({nproc} FF blocks "
-                       f"screened); click for the video snippet. ML filter + astrometry refine at dawn, "
-                       f"so the final count is usually lower.</span></h3>"
-                       f"<div class=grid>{cards}</div>")
+            dethtml = (f"<details style='margin:16px 0'>"
+                       f"<summary style='cursor:pointer'><b>Detections tonight</b> "
+                       f"<span class=muted>— {len(hits)} live candidate{'s' if len(hits) != 1 else ''} "
+                       f"({nproc} FF blocks screened), click to expand</span></summary>"
+                       f"<p class=muted>Click a block for the video snippet. ML filter + astrometry "
+                       f"refine at dawn, so the final count is usually lower.</p>"
+                       f"<div class=grid>{cards}</div></details>")
         else:
-            dethtml = (f"<h3>Detections tonight</h3>"
-                       f"<p class=muted>No meteor candidates yet ({nproc} FF blocks screened so far).</p>")
+            dethtml = (f"<details style='margin:16px 0'>"
+                       f"<summary style='cursor:pointer'><b>Detections tonight</b> "
+                       f"<span class=muted>— no candidates yet ({nproc} FF blocks screened)</span></summary>"
+                       f"<p class=muted>No meteor candidates yet ({nproc} FF blocks screened so far).</p>"
+                       f"</details>")
         # satellite pass log (written by the preview daemon's TLE propagation)
         sathtml = ""
         try:
