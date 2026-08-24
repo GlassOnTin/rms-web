@@ -435,6 +435,13 @@ def main():
                     pass                              # bad platepar/ephemeris -> plain images
             if stack_img is not None:
                 stack_img.save(STACK_PNG)
+            # Downscale the live view to ~display width with a proper low-pass (LANCZOS) BEFORE
+            # serving. Left full-res, the browser downsamples a grain-heavy frame itself, and its
+            # resample grid beats against the per-pixel noise -> moire/aliasing that shifts with
+            # zoom. Pre-filtering here removes it (and averages the grain down ~2x).
+            lw = 728
+            latest_img = latest_img.resize((lw, round(lw*latest_img.height/latest_img.width)),
+                                           Image.LANCZOS)
             latest_img.save(LATEST_PNG)
             count = total
             frames = count * 256
