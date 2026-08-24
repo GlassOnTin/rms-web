@@ -306,13 +306,28 @@ def recent_stars():
     latest = next((v for v in reversed(vals) if v > 0), vals[-1])   # skip the interleaved 0s
     return latest, max(vals[-25:])
 
+def _bin_points(raw, bin_minutes=3, trim_hours=None):
+    """Bin (dt, count) to bin_minutes keeping the MAX per bin (clarity peak, ignoring the
+    interleaved 0s / frame jitter). trim_hours drops anything older than trim_hours before the
+    last point (used live to shed the previous night's leftover log lines)."""
+    bins = {}
+    for dt, n in raw:
+        key = int(dt.timestamp() // (bin_minutes * 60))
+        cur = bins.get(key)
+        if cur is None or n > cur[1]:
+            bins[key] = (dt, n)
+    pts = sorted(bins.values(), key=lambda t: t[0])
+    if trim_hours and pts:
+        tlast = pts[-1][0]
+        pts = [(dt, n) for dt, n in pts if (tlast - dt).total_seconds() <= trim_hours * 3600]
+    return pts
+
 def star_history(bin_minutes=3):
-    """Tonight's star count over time as [(datetime, count)], binned to bin_minutes (max per
-    bin — the clarity peak, ignoring the interleaved 0s and frame jitter). Spans capture
-    restarts (reads every recent log). Free: RMS already logs 'Detected stars' per FF."""
+    """Tonight's star count over time (live, from the RMS logs). Spans capture restarts.
+    Free: RMS already logs 'Detected stars: N' per FF block."""
     rx = re.compile(r"(\d{4})/(\d\d)/(\d\d) (\d\d):(\d\d):(\d\d).*?Detected stars: (\d+)")
     cutoff = time.time() - 18 * 3600
-    bins = {}
+    raw = []
     for lg in glob.glob(os.path.join(ROOT, "logs", "log_UK00DY_*.log")):
         try:
             if os.path.getmtime(lg) < cutoff:
@@ -322,20 +337,39 @@ def star_history(bin_minutes=3):
             continue
         for m in rx.finditer(txt):
             y, mo, d, h, mi, s = (int(x) for x in m.groups()[:6])
-            n = int(m.group(7))
             try:
-                dt = datetime.datetime(y, mo, d, h, mi, s)
+                raw.append((datetime.datetime(y, mo, d, h, mi, s), int(m.group(7))))
             except ValueError:
                 continue
-            key = int(dt.timestamp() // (bin_minutes * 60))   # naive->local, but only a bin key (consistent)
-            cur = bins.get(key)
-            if cur is None or n > cur[1]:
-                bins[key] = (dt, n)
-    pts = sorted(bins.values(), key=lambda t: t[0])
-    if pts:                                     # keep only the current observing night (last ~10 h)
-        tlast = pts[-1][0]
-        pts = [(dt, n) for dt, n in pts if (tlast - dt).total_seconds() <= 10 * 3600]
-    return pts
+    return _bin_points(raw, bin_minutes, trim_hours=10)
+
+def star_history_calstars(night_dir, bin_minutes=3):
+    """Per-FF star count over an archived night, parsed from its CALSTARS file (count = star
+    rows per FF block; timestamp from the FF name). Dependency-free — no RMS import."""
+    files = glob.glob(os.path.join(night_dir, "CALSTARS*.txt"))
+    if not files:
+        return []
+    raw, ffdt, cnt = [], None, 0
+    starrx = re.compile(r"^\s*\d")               # star-data rows start with a number (Y coord)
+    try:
+        with open(files[0], errors="replace") as fh:
+            for line in fh:
+                if line.startswith("FF_"):
+                    if ffdt is not None:
+                        raw.append((ffdt, cnt))
+                    p = line.strip().split("_")   # FF_STATION_YYYYMMDD_HHMMSS_...
+                    try:
+                        ffdt = datetime.datetime.strptime(p[2] + p[3], "%Y%m%d%H%M%S")
+                    except (IndexError, ValueError):
+                        ffdt = None
+                    cnt = 0
+                elif ffdt is not None and starrx.match(line):
+                    cnt += 1
+            if ffdt is not None:
+                raw.append((ffdt, cnt))
+    except OSError:
+        return []
+    return _bin_points(raw, bin_minutes)
 
 def star_chart_svg(pts):
     """Inline SVG line/area chart of star count vs time, with the plate-solve thresholds as
@@ -876,6 +910,10 @@ class H(BaseHTTPRequestHandler):
                          f"<span class=muted style='font-size:12px'>— click a thumbnail for the video "
                          f"snippet (½ speed, rebuilt from the FF block)</span></h3>"
                          f"<div class=grid>{''.join(cards)}</div>")
+        _svg = star_chart_svg(star_history_calstars(safe))
+        if _svg:
+            parts.append("<h3>Star count through the night <span class=muted style='font-size:12px'>"
+                         "· UTC, 3-min peak; dashed = plate-solve thresholds</span></h3>" + _svg)
         for label, suf in [("Detected meteors", "_DETECTED_thumbs.jpg"),
                            ("Detected meteors — night stack", "_meteors.jpg"),
                            ("Captured stack (whole night)", "_captured_stack.jpg"),
