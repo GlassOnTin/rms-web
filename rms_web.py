@@ -421,10 +421,10 @@ class H(BaseHTTPRequestHandler):
         # deploy only if their sanity gates pass; capture is untouched). Detached so the request
         # returns immediately; each script manages its own .tilt_solving/.tilt_refitting flag.
         if u.path == "/plate_solve":
-            self._spawn_calib("/home/ian/auto_tilt_solve.py")
+            self._spawn_calib(os.path.join(ASSET_DIR, "auto_tilt_solve.py"))
             return self._send(303, "text/plain", b"", extra={"Location": "/tonight"})
         if u.path == "/refit_distortion":
-            self._spawn_calib("/home/ian/auto_refit_distortion.py")
+            self._spawn_calib(os.path.join(ASSET_DIR, "auto_refit_distortion.py"))
             return self._send(303, "text/plain", b"", extra={"Location": "/tonight"})
         self._send(404, "text/plain", b"not found")
 
