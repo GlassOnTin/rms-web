@@ -289,6 +289,23 @@ def tonight_detections():
             hits.append((m.group(1), n))
     return total, hits
 
+def recent_stars():
+    """Latest and recent-peak 'Detected stars: N' from the current RMS log — a live sky-clarity
+    readout. RMS already extracts this per FF block during capture, so surfacing it is free (we
+    just tail the log, no reprocessing). Returns (latest_nonzero, recent_peak) or (None, None)."""
+    try:
+        logs = os.path.join(ROOT, "logs")
+        cur = sorted(f for f in os.listdir(logs) if f.startswith("log_") and f.endswith(".log"))[-1]
+        out = subprocess.run(["tail", "-n", "400", os.path.join(logs, cur)],
+                             capture_output=True, text=True).stdout
+    except Exception:
+        return None, None
+    vals = [int(m) for m in re.findall(r"Detected stars: (\d+)", out)]
+    if not vals:
+        return None, None
+    latest = next((v for v in reversed(vals) if v > 0), vals[-1])   # skip the interleaved 0s
+    return latest, max(vals[-25:])
+
 PAGE = """<!doctype html><html><head><meta charset=utf-8>
 <meta name=viewport content="width=device-width,initial-scale=1">
 {refresh}
@@ -400,7 +417,26 @@ class H(BaseHTTPRequestHandler):
             except OSError:
                 pass
             return self._send(303, "text/plain", b"", extra={"Location": "/tonight"})
+        # Calibration actions: spawn the existing solver/refit scripts in FORCE mode (they
+        # deploy only if their sanity gates pass; capture is untouched). Detached so the request
+        # returns immediately; each script manages its own .tilt_solving/.tilt_refitting flag.
+        if u.path == "/plate_solve":
+            self._spawn_calib("/home/ian/auto_tilt_solve.py")
+            return self._send(303, "text/plain", b"", extra={"Location": "/tonight"})
+        if u.path == "/refit_distortion":
+            self._spawn_calib("/home/ian/auto_refit_distortion.py")
+            return self._send(303, "text/plain", b"", extra={"Location": "/tonight"})
         self._send(404, "text/plain", b"not found")
+
+    @staticmethod
+    def _spawn_calib(script):
+        try:
+            env = dict(os.environ, FORCE="1")
+            subprocess.Popen(["/home/ian/vRMS/bin/python", script], env=env,
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                             start_new_session=True)
+        except Exception:
+            pass
 
     def scorecard(self):
         import json as _json
@@ -458,6 +494,7 @@ class H(BaseHTTPRequestHandler):
         badge = "<span class='pill on'>● live</span>" if live else "<span class='pill off'>idle</span>"
         nproc, hits = tonight_detections()
         ncand = sum(n for _, n in hits)
+        slatest, speak = recent_stars()          # live sky-clarity readout (free — from the RMS log)
         if hits:
             # clickable grid: each flagged block -> detail page with a video snippet
             # (same idea as /night, but keyed on the FF block since tonight has no
@@ -551,6 +588,44 @@ class H(BaseHTTPRequestHandler):
                 f"tonight — rebuild to include frames from before the restart(s)</span></form>")
         else:
             rebuild_ctrl = ""
+
+        # Calibration controls — plate solve (after a camera move) + distortion refit. LAN-only
+        # dashboard; POST + confirm; the solver scripts are sanity-gated and deploy only a good
+        # fit (capture untouched). They run in FORCE mode, bypassing the auto guards.
+        HOME = os.path.expanduser("~")
+        solving = os.path.isfile(os.path.join(HOME, ".tilt_solving"))
+        refitting = os.path.isfile(os.path.join(HOME, ".tilt_refitting"))
+        solved = os.path.isfile(os.path.join(HOME, ".tilt_autosolve_done"))
+        refitted = os.path.isfile(os.path.join(HOME, ".tilt_refit_done"))
+        if solving or refitting:
+            calib_state = "⏳ %s running… (refresh in a minute or two)" % (
+                "plate solve" if solving else "distortion refit")
+        elif solved and refitted:
+            calib_state = "platepar solved + distortion refined"
+        elif solved:
+            calib_state = "pointing solved; distortion refit pending"
+        else:
+            calib_state = "not solved — auto plate-solve armed (runs on the next clear window)"
+
+        def _cbtn(action, label, confirm, disabled=False):
+            dis = " disabled title='needs a pointing solve first'" if disabled else ""
+            return (f"<form method=post action='{action}' style='display:inline;margin-right:8px'"
+                    f" onsubmit=\"return confirm('{confirm}')\">"
+                    f"<button type=submit{dis} style='padding:6px 12px;cursor:pointer;background:#1b2735;"
+                    f"color:#cfe3ff;border:1px solid #2f4a63;border-radius:6px;font-size:13px;"
+                    f"opacity:{'0.5' if disabled else '1'}'>{label}</button></form>")
+
+        calib_ctrl = (
+            "<h3>Calibration</h3>"
+            f"<p class=muted style='margin:6px 0'>Live platepar: {calib_state}. Re-solve after "
+            "moving the camera; refit to sharpen the distortion. Both are sanity-gated — a poor "
+            "fit is rejected and capture is untouched.</p>"
+            + ("" if (solving or refitting) else
+               _cbtn("/plate_solve", "↻ Re-solve platepar",
+                     "Re-solve the platepar now (blind plate solve)? Needs a clear sky (~100 stars); "
+                     "a poor solve is rejected.")
+               + _cbtn("/refit_distortion", "Refit distortion",
+                       "Refit the distortion from recent frames now?", disabled=not solved)))
         dusk, dawn = capture_window()
         window = ""
         if dusk:
@@ -567,7 +642,10 @@ class H(BaseHTTPRequestHandler):
             + (f"Last frame {stale}s ago." if live else
                "Capture not currently active; showing the most recent built preview.") + "</p>"
             f"<div style='display:flex;gap:16px;flex-wrap:wrap;margin:10px 0'>"
-            f"<div class=card><b>{d['count']}</b><br><span class=muted>FF blocks (256 fr each)</span></div>"
+            + (f"<div class=card><b>{slatest}</b><br><span class=muted>stars now · peak {speak}</span></div>"
+               if slatest is not None else
+               "<div class=card><b>—</b><br><span class=muted>stars (capture idle)</span></div>")
+            + f"<div class=card><b>{d['count']}</b><br><span class=muted>FF blocks (256 fr each)</span></div>"
             f"<div class=card><b>{d['frames']:,}</b><br><span class=muted>frames</span></div>"
             f"<div class=card><b>{d['duration_min']:.0f} min</b><br><span class=muted>captured tonight</span></div>"
             f"<div class=card><b>{ncand}</b><br><span class=muted>meteor candidates (pre-ML)</span></div>"
@@ -598,7 +676,8 @@ class H(BaseHTTPRequestHandler):
                # stale stack.png under tonight's caption.
                if d.get("stack_built") and mt("tonight_stack.png") else
                f"<p class=muted>No clear-sky frames in tonight's stack yet — the cumulative "
-               f"stack appears once the sky clears.</p>"))
+               f"stack appears once the sky clears.</p>")
+            + calib_ctrl)
         self.page("Tonight", body, refresh)
 
     def serve_asset(self, name, ctype):
