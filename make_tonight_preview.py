@@ -77,6 +77,19 @@ def stretch(arr, floor_sigma=4.0, key="stack"):
     _stretch_stats[key] = (bg, nz, hi)
     return np.clip(s / hi * 255, 0, 255).astype("uint8")
 
+def sky_stretch(arr):
+    """Photographic stretch for the 'latest sky' panel: show the REAL sky tone - clouds,
+    moonlight, twilight glow - instead of crushing the background to black to isolate stars
+    (which stretch() does, and which makes a cloudy sky render as an empty black frame). Maps
+    a low..high percentile of the actual levels with a mild asinh lift so cloud gradients read
+    as grey while stars still stand out."""
+    a = arr.astype(np.float32)
+    lo = float(np.percentile(a, 5.0))
+    hi = max(float(np.percentile(a, 99.7)), lo + 5.0)
+    x = np.clip((a - lo)/(hi - lo), 0.0, 1.0)
+    x = np.arcsinh(x*8.0)/np.arcsinh(8.0)           # lift midtones without blowing the clouds out
+    return np.clip(x*255, 0, 255).astype("uint8")
+
 def ff_time(name):
     # FF_XX0001_YYYYMMDD_HHMMSS_mmm_NNNNNNN.fits
     try:
@@ -395,7 +408,7 @@ def main():
                 pass
 
         if (added or force_render) and latest_mp is not None:
-            latest_img = Image.fromarray(stretch(latest_mp, floor_sigma=3.5, key="latest"))
+            latest_img = Image.fromarray(sky_stretch(latest_mp))   # photographic (shows cloud/tone)
             # `running` stays None until the first FF passes the clear-sky gate; on an
             # all-cloud night every block is gated out, so skip the whole-night stack
             # image rather than crashing on stretch(None) — the latest sky + fresh meta
