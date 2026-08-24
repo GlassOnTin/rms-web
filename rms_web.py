@@ -306,6 +306,81 @@ def recent_stars():
     latest = next((v for v in reversed(vals) if v > 0), vals[-1])   # skip the interleaved 0s
     return latest, max(vals[-25:])
 
+def star_history(bin_minutes=3):
+    """Tonight's star count over time as [(datetime, count)], binned to bin_minutes (max per
+    bin — the clarity peak, ignoring the interleaved 0s and frame jitter). Spans capture
+    restarts (reads every recent log). Free: RMS already logs 'Detected stars' per FF."""
+    rx = re.compile(r"(\d{4})/(\d\d)/(\d\d) (\d\d):(\d\d):(\d\d).*?Detected stars: (\d+)")
+    cutoff = time.time() - 18 * 3600
+    bins = {}
+    for lg in glob.glob(os.path.join(ROOT, "logs", "log_UK00DY_*.log")):
+        try:
+            if os.path.getmtime(lg) < cutoff:
+                continue
+            txt = subprocess.run(["tail", "-n", "20000", lg], capture_output=True, text=True).stdout
+        except Exception:
+            continue
+        for m in rx.finditer(txt):
+            y, mo, d, h, mi, s = (int(x) for x in m.groups()[:6])
+            n = int(m.group(7))
+            try:
+                dt = datetime.datetime(y, mo, d, h, mi, s)
+            except ValueError:
+                continue
+            key = int(dt.timestamp() // (bin_minutes * 60))   # naive->local, but only a bin key (consistent)
+            cur = bins.get(key)
+            if cur is None or n > cur[1]:
+                bins[key] = (dt, n)
+    pts = sorted(bins.values(), key=lambda t: t[0])
+    if pts:                                     # keep only the current observing night (last ~10 h)
+        tlast = pts[-1][0]
+        pts = [(dt, n) for dt, n in pts if (tlast - dt).total_seconds() <= 10 * 3600]
+    return pts
+
+def star_chart_svg(pts):
+    """Inline SVG line/area chart of star count vs time, with the plate-solve thresholds as
+    labelled status reference lines (same amber/green as the card). Single series -> no legend
+    (the heading names it). Dark-theme only, matching the dashboard; no JS."""
+    if len(pts) < 3:
+        return ""
+    W, H, ml, mr, mt, mb = 720, 190, 34, 46, 14, 24
+    pw, ph = W - ml - mr, H - mt - mb
+    t0, t1 = pts[0][0], pts[-1][0]
+    span = max((t1 - t0).total_seconds(), 60.0)
+    ymax = max(110, ((max(n for _, n in pts) // 10) + 1) * 10)
+    X = lambda dt: ml + pw * ((dt - t0).total_seconds() / span)
+    Y = lambda n: mt + ph * (1 - min(n, ymax) / ymax)
+    pl = " ".join("%.1f,%.1f" % (X(dt), Y(n)) for dt, n in pts)
+    area = "%.1f,%.1f " % (X(t0), mt + ph) + pl + " %.1f,%.1f" % (X(t1), mt + ph)
+    thr = ""
+    for v, col, lab in [(40, "#e2c98b", "40 recal"), (70, "#a9d97a", "70 solve"), (100, "#7ee29a", "100 ✓")]:
+        if v <= ymax:
+            yy = Y(v)
+            thr += ("<line x1='%.1f' y1='%.1f' x2='%.1f' y2='%.1f' stroke='%s' stroke-width='1' "
+                    "stroke-dasharray='4 4' opacity='0.65'/>"
+                    "<text x='%.1f' y='%.1f' fill='%s' font-size='10' dominant-baseline='middle'>%s</text>"
+                    % (ml, yy, ml + pw, yy, col, ml + pw + 3, yy, col, lab))
+    xt = ""
+    hh = t0.replace(minute=0, second=0, microsecond=0) + datetime.timedelta(hours=1)
+    while hh < t1:
+        xx = X(hh)
+        xt += ("<line x1='%.1f' y1='%.1f' x2='%.1f' y2='%.1f' stroke='#2a3550' stroke-width='1'/>"
+               "<text x='%.1f' y='%.1f' fill='#8a97ab' font-size='10' text-anchor='middle'>%02d:00</text>"
+               % (xx, mt, xx, mt + ph, xx, H - 6, hh.hour))
+        hh += datetime.timedelta(hours=1)
+    yax = ("<text x='%.1f' y='%.1f' fill='#8a97ab' font-size='10' text-anchor='end'>%d</text>"
+           "<text x='%.1f' y='%.1f' fill='#8a97ab' font-size='10' text-anchor='end'>0</text>"
+           % (ml - 4, mt + 9, ymax, ml - 4, mt + ph))
+    return ("<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 %d %d' "
+            "style='width:100%%;max-width:%dpx;height:auto;margin:6px 0' "
+            "role='img' aria-label='Star count through tonight'>"
+            "<rect x='%d' y='%d' width='%d' height='%d' fill='none' stroke='#1e2740'/>"
+            "%s%s"
+            "<polygon points='%s' fill='#7db4ff' opacity='0.12'/>"
+            "<polyline points='%s' fill='none' stroke='#7db4ff' stroke-width='2' "
+            "stroke-linejoin='round' stroke-linecap='round'/>%s</svg>"
+            % (W, H, W, ml, mt, pw, ph, xt, thr, area, pl, yax))
+
 PAGE = """<!doctype html><html><head><meta charset=utf-8>
 <meta name=viewport content="width=device-width,initial-scale=1">
 {refresh}
@@ -521,6 +596,9 @@ class H(BaseHTTPRequestHandler):
             "<span style='color:#e2c98b'>40–69 recalibration only</span> · "
             "<span style='color:#a9d97a'>70+ solve attempts</span> · "
             "<span style='color:#7ee29a'>100+ reliable solve</span>.</p>")
+        _svg = star_chart_svg(star_history())
+        star_chart = ("<h3>Star count tonight <span class=muted style='font-size:12px'>· UTC, "
+                      "3-min peak</span></h3>" + _svg) if _svg else ""
         if hits:
             # clickable grid: each flagged block -> detail page with a video snippet
             # (same idea as /night, but keyed on the FF block since tonight has no
@@ -674,7 +752,7 @@ class H(BaseHTTPRequestHandler):
             f"<div class=card><b>{d['duration_min']:.0f} min</b><br><span class=muted>captured tonight</span></div>"
             f"<div class=card><b>{ncand}</b><br><span class=muted>meteor candidates (pre-ML)</span></div>"
             f"</div>"
-            + star_legend
+            + star_legend + star_chart
             + dethtml + sathtml + airhtml +
             ((f"<h3>Detected meteors — night stack</h3>"
               f"<p class=muted>Max-stack of the {d.get('det_blocks', 0)} unexplained candidate block"
