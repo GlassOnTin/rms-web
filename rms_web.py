@@ -271,6 +271,35 @@ def capture_window():
     except Exception:
         return None, None
 
+def ml_retention(n_nights=6):
+    """Historical dawn-ML retention = (final meteors)/(pre-ML candidates) over recent archived
+    nights. A true per-block ML score isn't reproducible live (the model needs the dawn crop,
+    which needs the capture-time detection context), so /tonight shows the raw pre-ML count with
+    this data-backed 'expect ~N real' instead. Returns {ratio, rows:[(unf,final)...]} or None."""
+    rows, tot_u, tot_f = [], 0, 0
+    for d in sorted(glob.glob(os.path.join(ARCH_DET, "UK00DY_*")), key=os.path.getmtime, reverse=True):
+        name = os.path.basename(d)
+        unf = os.path.join(d, "FTPdetectinfo_%s_unfiltered.txt" % name)
+        fin = os.path.join(d, "FTPdetectinfo_%s.txt" % name)
+        if not (os.path.isfile(unf) and os.path.isfile(fin)):
+            continue
+        try:
+            mu = re.search(r"Meteor Count = (\d+)", open(unf).read())
+            mf = re.search(r"Meteor Count = (\d+)", open(fin).read())
+        except OSError:
+            continue
+        if not (mu and mf):
+            continue
+        u, f = int(mu.group(1)), int(mf.group(1))
+        if u == 0:
+            continue
+        rows.append((u, f)); tot_u += u; tot_f += f
+        if len(rows) >= n_nights:
+            break
+    if not rows or tot_u == 0:
+        return None
+    return {"ratio": tot_f/tot_u, "rows": rows, "tot_u": tot_u, "tot_f": tot_f}
+
 def tonight_detections():
     """Live meteor candidates from the newest RMS log: per-FF 'detected meteors: N'
     lines emitted by the real-time detector (pre-ML; the ML filter prunes at dawn)."""
@@ -603,6 +632,17 @@ class H(BaseHTTPRequestHandler):
         badge = "<span class='pill on'>● live</span>" if live else "<span class='pill off'>idle</span>"
         nproc, hits = tonight_detections()
         ncand = sum(n for _, n in hits)
+        # data-backed 'expect ~N real' from historical dawn-ML retention (a true live per-block
+        # score isn't reproducible without the dawn pipeline)
+        _mlr = ml_retention()
+        if _mlr and ncand:
+            _recent = ", ".join("%d&rarr;%d" % (u, f) for u, f in _mlr["rows"][:4])
+            ml_note = (" <span class=muted>· ~%.0f%% survive dawn ML+astrometry here (recent %s), "
+                       "so expect ~%d real</span>" % (100*_mlr["ratio"], _recent,
+                                                      round(ncand*_mlr["ratio"])))
+            ml_short = " &middot; ~%d real after ML" % round(ncand*_mlr["ratio"])
+        else:
+            ml_note = ml_short = ""
         slatest, speak = recent_stars()          # live sky-clarity readout (free — from the RMS log)
         # Colour the star count by plate-solve readiness (judged on the recent PEAK — the metric
         # auto_tilt_solve gates on). Thresholds: per-FF recalibration converges from ~40 detected
@@ -649,9 +689,9 @@ class H(BaseHTTPRequestHandler):
             dethtml = (f"<details style='margin:16px 0'>"
                        f"<summary style='cursor:pointer'><b>Detections tonight</b> "
                        f"<span class=muted>— {len(hits)} live candidate{'s' if len(hits) != 1 else ''} "
-                       f"({nproc} FF blocks screened), click to expand</span></summary>"
-                       f"<p class=muted>Click a block for the video snippet. ML filter + astrometry "
-                       f"refine at dawn, so the final count is usually lower.</p>"
+                       f"({nproc} FF blocks screened){ml_short}, click to expand</span></summary>"
+                       f"<p class=muted>Click a block for the video snippet. Pre-ML — most are cloud/"
+                       f"aircraft/satellite artefacts the dawn filter removes.{ml_note}</p>"
                        f"<div class=grid>{cards}</div></details>")
         else:
             dethtml = (f"<details style='margin:16px 0'>"
