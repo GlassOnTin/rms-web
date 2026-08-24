@@ -32,10 +32,17 @@ IMX296 --rpicam-vid--> ffmpeg (rawvideo) --> v4l2loopback
 | `mediamtx.yml` | `/home/ian/source/mediamtx/mediamtx.yml` | `cam1` path = on-demand h264 encode of `/dev/video11`; the `-vf` carries the brightness stretch |
 
 **Brightness stretch:** `mediamtx.yml`'s `cam1` filter is
-`scale=728:544,gblur=sigma=1.0,normalize=smoothing=15` — a per-frame adaptive
-auto-levels (like the dashboard's `sky_stretch`) so the dim raw sensor feed shows
-cloud/sky detail dusk-to-dawn without blowing out at twilight. `gblur` first so a
-hot pixel can't steal `normalize`'s range.
+`scale=728:544,tmix=frames=8,curves=all='0/0 0.05/0.4 0.15/0.75 0.4/0.95 1/1'`
+with the encoder at `-crf 23`. The raw sensor feed is very dark (~4/255) and noisy,
+so a strong `curves` shadow-lift makes cloud/sky detail visible. The two anti-flicker
+pieces matter: **`tmix`** temporally averages 8 frames (kills the per-frame noise the
+encoder chokes on), and **`-crf 23`** (constant-quality instead of a target bitrate)
+stops the h264 rate-control from pulsing brightness on the noisy dark input. A fixed
+curve (rather than adaptive `normalize`, which uses noisy min/max and needs a warm-up)
+means there's no per-frame statistic to chase — so no adaptive flicker. Trade-off: the
+fixed curve brightens toward white at twilight/dawn; if that's annoying, swap the
+`curves=...` for `median=radius=1,normalize=smoothing=60` (adaptive, median makes it
+percentile-robust) — hot-reloads, no restart.
 
 ## Deploy / restart notes
 - **mediamtx.yml hot-reloads** — mediamtx watches the file and reloads on change

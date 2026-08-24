@@ -835,9 +835,9 @@ paths:
     runOnDemand: >
       ffmpeg -hide_banner -loglevel error
       -f v4l2 -input_format gray -framerate 25 -video_size 1456x1088 -i /dev/video11
-      -vf scale=728:544,gblur=sigma=1.0,normalize=smoothing=15 -r 10
+      -vf scale=728:544,tmix=frames=8,curves=all='0/0 0.05/0.4 0.15/0.75 0.4/0.95 1/1' -r 10
       -c:v libx264 -preset ultrafast -tune zerolatency -profile:v baseline
-      -pix_fmt yuv420p -b:v 6000000 -g 10
+      -pix_fmt yuv420p -crf 23 -g 10
       -f rtsp rtsp://localhost:$RTSP_PORT/$MTX_PATH
     runOnDemandRestart: yes
     runOnDemandCloseAfter: 10s
