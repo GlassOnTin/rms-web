@@ -800,7 +800,6 @@ class H(BaseHTTPRequestHandler):
             f"<h3>Latest sky (~10 s)</h3>"
             f"<img src='/tonight_latest.png?v={mt('tonight_latest.png')}'>"
             f"<h3>Night so far — cumulative stack</h3>"
-            + rebuild_ctrl
             + ((f"<p class=muted>Every star trail, satellite and meteor caught since "
                 f"{html.escape(d['first_ff'])} (through {html.escape(d['last_ff'])}). Live preview — "
                 f"RMS builds the clean final stack at dawn. Overlay: <span style='color:#78c8ff'>stars</span>, "
@@ -814,7 +813,8 @@ class H(BaseHTTPRequestHandler):
                if d.get("stack_built") and mt("tonight_stack.png") else
                f"<p class=muted>No clear-sky frames in tonight's stack yet — the cumulative "
                f"stack appears once the sky clears.</p>")
-            + calib_ctrl)
+            + calib_ctrl
+            + rebuild_ctrl)          # rebuild control at the very end of the page
         self.page("Tonight", body, refresh)
 
     def serve_asset(self, name, ctype):
