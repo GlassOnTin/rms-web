@@ -495,6 +495,32 @@ class H(BaseHTTPRequestHandler):
         nproc, hits = tonight_detections()
         ncand = sum(n for _, n in hits)
         slatest, speak = recent_stars()          # live sky-clarity readout (free — from the RMS log)
+        # Colour the star count by plate-solve readiness (judged on the recent PEAK — the metric
+        # auto_tilt_solve gates on). Thresholds: per-FF recalibration converges from ~40 detected
+        # stars; the auto blind-solve gate is 70; a reliable blind solve wants ~100 (it has failed
+        # at 85 in thin cloud). ~1/4–1/3 of detections are sensor noise on this camera.
+        if speak is None:
+            star_col, star_msg = "#868e96", "capture idle"
+        elif speak < 40:
+            star_col, star_msg = "#e28b8b", "too few — hazy/cloudy"
+        elif speak < 70:
+            star_col, star_msg = "#e2c98b", "recalibration only"
+        elif speak < 100:
+            star_col, star_msg = "#a9d97a", "solve armed (borderline)"
+        else:
+            star_col, star_msg = "#7ee29a", "clear — solve-ready"
+        star_card = (
+            f"<div class=card><b style='color:{star_col}'>{slatest}</b><br>"
+            f"<span class=muted>stars now · peak {speak} — {star_msg}</span></div>"
+            if slatest is not None else
+            "<div class=card><b>—</b><br><span class=muted>stars (capture idle)</span></div>")
+        star_legend = (
+            "<p class=muted style='margin:2px 0 12px;font-size:12px'>Stars = detected per 10&nbsp;s "
+            "frame (RMS extraction; ~¼–⅓ are sensor noise). Plate-solve readiness by recent peak: "
+            "<span style='color:#e28b8b'>&lt;40 hazy</span> · "
+            "<span style='color:#e2c98b'>40–69 recalibration only</span> · "
+            "<span style='color:#a9d97a'>70+ solve attempts</span> · "
+            "<span style='color:#7ee29a'>100+ reliable solve</span>.</p>")
         if hits:
             # clickable grid: each flagged block -> detail page with a video snippet
             # (same idea as /night, but keyed on the FF block since tonight has no
@@ -642,14 +668,13 @@ class H(BaseHTTPRequestHandler):
             + (f"Last frame {stale}s ago." if live else
                "Capture not currently active; showing the most recent built preview.") + "</p>"
             f"<div style='display:flex;gap:16px;flex-wrap:wrap;margin:10px 0'>"
-            + (f"<div class=card><b>{slatest}</b><br><span class=muted>stars now · peak {speak}</span></div>"
-               if slatest is not None else
-               "<div class=card><b>—</b><br><span class=muted>stars (capture idle)</span></div>")
+            + star_card
             + f"<div class=card><b>{d['count']}</b><br><span class=muted>FF blocks (256 fr each)</span></div>"
             f"<div class=card><b>{d['frames']:,}</b><br><span class=muted>frames</span></div>"
             f"<div class=card><b>{d['duration_min']:.0f} min</b><br><span class=muted>captured tonight</span></div>"
             f"<div class=card><b>{ncand}</b><br><span class=muted>meteor candidates (pre-ML)</span></div>"
             f"</div>"
+            + star_legend
             + dethtml + sathtml + airhtml +
             ((f"<h3>Detected meteors — night stack</h3>"
               f"<p class=muted>Max-stack of the {d.get('det_blocks', 0)} unexplained candidate block"
