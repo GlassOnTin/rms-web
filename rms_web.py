@@ -819,6 +819,7 @@ class H(BaseHTTPRequestHandler):
             f"<p class=muted>Night <b>{html.escape(d['dir'])}</b> — auto-refreshes every 20&nbsp;s.{window} "
             + (f"Last frame {stale}s ago." if live else
                "Capture not currently active; showing the most recent built preview.") + "</p>"
+            + star_chart
             + f"<h3>Live view <span class=muted style='font-size:12px'>· latest ~10&nbsp;s frame</span></h3>"
             f"<img src='/tonight_latest.png?v={mt('tonight_latest.png')}'>"
             f"<div style='display:flex;gap:16px;flex-wrap:wrap;margin:10px 0'>"
@@ -828,7 +829,7 @@ class H(BaseHTTPRequestHandler):
             f"<div class=card><b>{d['duration_min']:.0f} min</b><br><span class=muted>captured tonight</span></div>"
             f"<div class=card><b>{ncand}</b><br><span class=muted>meteor candidates (pre-ML)</span></div>"
             f"</div>"
-            + star_legend + star_chart
+            + star_legend
             + dethtml + sathtml + airhtml +
             ((f"<h3>Detected meteors — night stack</h3>"
               f"<p class=muted>Max-stack of the {d.get('det_blocks', 0)} unexplained candidate block"
