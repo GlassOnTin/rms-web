@@ -1,0 +1,17 @@
+[Unit]
+Description=MediaMTX RTSP/RTMP/HLS/WebRTC media server
+Documentation=https://github.com/bluenviron/mediamtx
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ian
+Group=ian
+WorkingDirectory=/home/ian/source/mediamtx
+ExecStart=/home/ian/source/mediamtx/mediamtx /home/ian/source/mediamtx/mediamtx.yml
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,19 @@
+[Unit]
+Description=IMX296 CSI camera -> RTSP bridge for RMS (rpicam-vid | ffmpeg)
+After=mediamtx.service
+Requires=mediamtx.service
+
+[Service]
+Type=simple
+User=ian
+Group=ian
+SupplementaryGroups=video render
+# Wait for MediaMTX's RTSP port before starting ffmpeg (Type=simple reports "started"
+# at fork, not when listening) — avoids a failed first start / restart churn on boot.
+ExecStartPre=/bin/bash -c 'for i in $(seq 1 30); do (exec 3<>/dev/tcp/localhost/8554) 2>/dev/null && exit 0; sleep 0.5; done; exit 0'
+ExecStart=/home/ian/source/rms-csi-bridge.sh --once
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
