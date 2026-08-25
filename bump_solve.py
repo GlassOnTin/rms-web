@@ -29,12 +29,13 @@ On success it writes the auto markers (~/.tilt_autosolve_done + ~/.tilt_refit_do
 cron auto-solve stays disarmed. Re-arm after a future move: rm those two markers.
 Logs to /mnt/nvme/RMS_data/logs/bump_solve.log
 """
-import os, sys, glob, copy, errno, datetime, time
+import os, sys, glob, copy, datetime
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))    # for calib_lock (same dir)
 sys.path.insert(0, "/home/ian/source/RMS")
 import numpy as np
+import calib_lock
 
-LOCK    = "/home/ian/.tilt_bumpsolving"          # atomic run-lock (idempotency)
-LOCK_STALE_S = 20 * 60
+UI_FLAG = "/home/ian/.tilt_bumpsolving"          # UI state only; calib_lock enforces exclusion
 AUTOSOLVE_MARKER = "/home/ian/.tilt_autosolve_done"
 REFIT_MARKER     = "/home/ian/.tilt_refit_done"
 LIVE_PP = "/home/ian/source/RMS/platepar_cmn2010.cal"
@@ -64,26 +65,6 @@ def log(m):
         open(LOG, "a").write(s + "\n")
     except OSError:
         pass
-
-
-def acquire_lock():
-    """Atomic O_EXCL create; reclaim a stale lock from a crashed run. Returns True if held."""
-    try:
-        fd = os.open(LOCK, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-        os.write(fd, datetime.datetime.utcnow().isoformat().encode())
-        os.close(fd)
-        return True
-    except OSError as e:
-        if e.errno != errno.EEXIST:
-            raise
-        try:
-            if time.time() - os.path.getmtime(LOCK) > LOCK_STALE_S:
-                log("reclaiming stale lock (>%dmin)" % (LOCK_STALE_S // 60))
-                os.remove(LOCK)
-                return acquire_lock()
-        except OSError:
-            pass
-        return False
 
 
 def find_night(config):
@@ -287,16 +268,22 @@ def main():
 
 
 if __name__ == "__main__":
-    if not acquire_lock():
-        log("already running (lock held) — skipping this click")
+    if not calib_lock.acquire():                 # shared across all calib scripts (idempotent clicks)
+        log("a calibration is already running — skipping this click")
         sys.exit(0)
+    try:
+        open(UI_FLAG, "w").write(datetime.datetime.utcnow().isoformat())   # UI: show/hide buttons
+    except OSError:
+        pass
     try:
         main()
     except Exception:
         import traceback
         log("ERROR: " + traceback.format_exc().replace("\n", " | ")[-800:])
     finally:
-        try:
-            os.remove(LOCK)
-        except OSError:
-            pass
+        for f in (UI_FLAG,):
+            try:
+                os.remove(f)
+            except OSError:
+                pass
+        calib_lock.release()

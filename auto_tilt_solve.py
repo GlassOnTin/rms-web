@@ -20,7 +20,9 @@ To re-enable BOTH stages after a future camera move:
 Logs to /mnt/nvme/RMS_data/logs/auto_tilt_solve.log
 """
 import os, sys, glob, shutil, re, time, datetime, subprocess
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))   # for calib_lock (sibling)
 sys.path.insert(0, "/home/ian/source/RMS")
+import calib_lock
 
 MARKER  = "/home/ian/.tilt_autosolve_done"
 SOLVING = "/home/ian/.tilt_solving"         # present while a forced (UI-triggered) solve runs
@@ -124,17 +126,23 @@ def main():
         % (os.path.basename(LIVE_PP), stamp))
 
 if __name__ == "__main__":
-    if FORCE:
-        try:
-            open(SOLVING, "w").write(datetime.datetime.utcnow().isoformat())
-        except OSError:
-            pass
-        try:
-            main()
-        finally:
+    # Shared lock so no two calibration scripts (solve/refit/bump) — or the 15-min cron
+    # firing mid-run — ever race on the live platepar. Idempotent: extra clicks are no-ops.
+    if not calib_lock.acquire():
+        if FORCE:
+            log("a calibration is already running — skipping this click")
+        sys.exit(0)
+    try:
+        if FORCE:
+            try:
+                open(SOLVING, "w").write(datetime.datetime.utcnow().isoformat())
+            except OSError:
+                pass
+        main()
+    finally:
+        if FORCE:
             try:
                 os.remove(SOLVING)
             except OSError:
                 pass
-    else:
-        main()
+        calib_lock.release()
