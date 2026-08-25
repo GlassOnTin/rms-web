@@ -564,6 +564,12 @@ class H(BaseHTTPRequestHandler):
         if u.path == "/refit_distortion":
             self._spawn_calib(os.path.join(ASSET_DIR, "auto_refit_distortion.py"))
             return self._send(303, "text/plain", b"", extra={"Location": "/tonight"})
+        # Bump recovery: correspondence grid-search + pointing fit + union refit (works on
+        # this fisheye where astrometry.net can't). Idempotent — its own O_EXCL lock makes
+        # repeat/concurrent clicks a no-op, so a double POST can't launch two solves.
+        if u.path == "/bump_solve":
+            self._spawn_calib(os.path.join(ASSET_DIR, "bump_solve.py"))
+            return self._send(303, "text/plain", b"", extra={"Location": "/tonight"})
         self._send(404, "text/plain", b"not found")
 
     @staticmethod
@@ -773,11 +779,13 @@ class H(BaseHTTPRequestHandler):
         HOME = os.path.expanduser("~")
         solving = os.path.isfile(os.path.join(HOME, ".tilt_solving"))
         refitting = os.path.isfile(os.path.join(HOME, ".tilt_refitting"))
+        bumpsolving = os.path.isfile(os.path.join(HOME, ".tilt_bumpsolving"))
+        busy = solving or refitting or bumpsolving
         solved = os.path.isfile(os.path.join(HOME, ".tilt_autosolve_done"))
         refitted = os.path.isfile(os.path.join(HOME, ".tilt_refit_done"))
-        if solving or refitting:
+        if busy:
             calib_state = "⏳ %s running… (refresh in a minute or two)" % (
-                "plate solve" if solving else "distortion refit")
+                "plate solve" if solving else "distortion refit" if refitting else "bump recovery")
         elif solved and refitted:
             calib_state = "platepar solved + distortion refined"
         elif solved:
@@ -796,14 +804,19 @@ class H(BaseHTTPRequestHandler):
         calib_ctrl = (
             "<h3>Calibration</h3>"
             f"<p class=muted style='margin:6px 0'>Live platepar: {calib_state}. Re-solve after "
-            "moving the camera; refit to sharpen the distortion. Both are sanity-gated — a poor "
-            "fit is rejected and capture is untouched.</p>"
-            + ("" if (solving or refitting) else
+            "moving the camera; refit to sharpen the distortion; fix a bump if the camera was "
+            "knocked. All are sanity-gated — a poor fit is rejected and capture is untouched.</p>"
+            + ("" if busy else
                _cbtn("/plate_solve", "↻ Re-solve platepar",
                      "Re-solve the platepar now (blind plate solve)? Needs a clear sky (~100 stars); "
                      "a poor solve is rejected.")
                + _cbtn("/refit_distortion", "Refit distortion",
-                       "Refit the distortion from recent frames now?", disabled=not solved)))
+                       "Refit the distortion from recent frames now?", disabled=not solved)
+               # Bump recovery: correspondence solve that works on this fisheye (+ hazy skies)
+               # where the blind plate solve can't. Grid-search + pointing fit + union refit.
+               + _cbtn("/bump_solve", "✚ Fix camera bump",
+                       "Recover the platepar after a knock? Grid-searches the shift from the "
+                       "current pointing, refits, and deploys only if the fit is good.")))
         dusk, dawn = capture_window()
         window = ""
         if dusk:
