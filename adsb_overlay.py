@@ -19,7 +19,9 @@ from RMS.Astrometry.Conversions import altAz2RADec
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 PASSES_JSON = os.path.join(HERE, "air_passes.json")
-URL = "https://opendata.adsb.fi/api/v2/lat/{:.4f}/lon/{:.4f}/dist/20"
+# query centre rounded to 2 dp (~1 km) — no reason to disclose finer than that for a 20 km
+# radius; the ENU dead-reckoning below still uses the full platepar lat/lon locally.
+URL = "https://opendata.adsb.fi/api/v2/lat/{:.2f}/lon/{:.2f}/dist/20"
 BLOCK_S = 10.24
 EL_MIN = 45.0                       # deg; zenith FOV bottoms out ~50
 AIR_COL = (255, 120, 120)

@@ -86,7 +86,10 @@ def refresh_stations():
                 if len(p) >= 2:
                     try: lon += float(p[0]); lat += float(p[1]); n += 1
                     except: pass
-            if n: return f"{f.split('-')[0]},{lat/n:.5f},{lon/n:.5f}"
+            # PRIVACY: round to 2 dp (~1 km) at the point of output — GMN policy, never publish
+            # finer. Rounding (not random jitter) is deterministic, so repeated refreshes give the
+            # same value and can't be averaged to recover the true position.
+            if n: return f"{f.split('-')[0]},{lat/n:.2f},{lon/n:.2f}"
         except Exception:
             return None
         return None

@@ -885,7 +885,7 @@ class H(BaseHTTPRequestHandler):
                      f"<td class=muted>{s['lat']:.3f}, {s['lon']:.3f}</td></tr>")
         body = (
             f"<h2>Meteor-network neighbours</h2>"
-            f"<p class=muted>Nearest GMN / UK-network stations to your camera ({d['lat']:.4f}, {d['lon']:.4f}). "
+            f"<p class=muted>Nearest GMN / UK-network stations to your camera ({d['lat']:.2f}, {d['lon']:.2f}). "
             f"Positions are 25&nbsp;km FOV centroids (±~10–20&nbsp;km); overlap uses each station's real "
             f"100&nbsp;km field of view.</p>"
             f"<div style='display:flex;gap:16px;flex-wrap:wrap;margin:10px 0'>"
