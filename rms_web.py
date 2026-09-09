@@ -788,9 +788,10 @@ class H(BaseHTTPRequestHandler):
         _ahead = "%.1f h" % ((_dawn - datetime.datetime.now()).total_seconds() / 3600.0) \
             if (_dawn and _proj) else ""
         _pnote = ("<p class=muted style='margin:2px 0;font-size:12px'>Dashed: extrapolated to dawn "
-                  "({ahead} ahead) from the current sky level against this station's clear-sky hour "
-                  "shape, &plusmn;20% band. Assumes the sky holds — not a forecast, and most wrong "
-                  "when cloud breaks or closes later in the night.</p>").format(ahead=_ahead) \
+                  "({ahead} ahead) from this camera's own star counts — tonight's live log against "
+                  "the clear-sky hour shape of past archived nights; no weather forecast is "
+                  "involved. &plusmn;20% band, assumes the sky holds. Most wrong when cloud breaks "
+                  "or closes later in the night.</p>").format(ahead=_ahead) \
             if _proj else ""
         star_chart = ("<h3>Star count tonight <span class=muted style='font-size:12px'>· UTC, "
                       "3-min peak</span></h3>" + _svg + _pnote) if _svg else ""
