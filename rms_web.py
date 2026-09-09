@@ -8,7 +8,7 @@ timelapses) over HTTP so they can be viewed in a browser without SSH. Read-only
 to the public internet — LAN use only.
 """
 import os, re, html, time, glob, datetime, urllib.parse, urllib.request, mimetypes, subprocess
-import json, threading
+import json, threading, statistics
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 ROOT = os.environ.get("RMS_DATA", "/mnt/nvme/RMS_data")
@@ -400,21 +400,118 @@ def star_history_calstars(night_dir, bin_minutes=3):
         return []
     return _bin_points(raw, bin_minutes)
 
-def star_chart_svg(pts):
+STAR_BASE = {"at": 0.0, "base": None}
+STAR_BASE_SINCE = "20260906"   # nights from this date on share the current detection config
+
+def star_baseline():
+    """Clear-sky star-count baseline per UTC hour, in the same 3-min-max-bin units as the live
+    chart: for each hour, the highest hourly-median value seen across archived nights. Cloudy
+    nights sit below it, so the max tracks the clearest sky recorded at that hour and
+    self-updates as nights archive. Caveat: hours not yet covered by a night at the current
+    detection config (dusk 19/20, dawn 04 until such a night reaches them) keep a stale value.
+    Cached for 1 h. Nights before STAR_BASE_SINCE are excluded: they were captured at a
+    different detection config (intensity_threshold was lowered 12 -> 6 on 2026-09-06,
+    roughly doubling counts) and a hazy Aug-27 night at the old config recorded 91-110
+    "stars"/FF from cloud edges, which the across-night max otherwise adopts."""
+    if STAR_BASE["base"] is not None and time.time() - STAR_BASE["at"] < 3600:
+        return STAR_BASE["base"]
+    base = {}
+    for d in glob.glob(os.path.join(ARCH_DET, "UK00DY_%s*" % STAR_BASE_SINCE)):
+        pts = star_history_calstars(d, bin_minutes=3)
+        if len(pts) < 100:
+            continue
+        byh = {}
+        for dt, n in pts:
+            if n > 0:
+                byh.setdefault(dt.hour, []).append(n)
+        for h, v in byh.items():
+            if len(v) >= 12:                     # >= 36 min of that hour actually observed
+                med = statistics.median(v)
+                base[h] = max(base.get(h, 0), med)
+    if base:
+        STAR_BASE.update(at=time.time(), base=base)
+        return base
+    return STAR_BASE["base"] or {}
+
+def star_projection(pts, dawn):
+    """Extend tonight's observed star curve to dawn as a dashed projection. Backtested shape
+    model: the current sky state (hourly-median level of the last two complete observed hours
+    vs the clear-sky baseline for those hours) scales the baseline's hour shape forward, so a
+    hazy or partly cloudy night continues at its own reduced level. Backtest over archived
+    Sep-2026 nights (cut at 22:00/23:00/00:00): RMSE ~10 stars (~14% of the clear level) vs
+    ~11 for flat persistence; it cannot see the sky changing after the cut, which is exactly
+    when it is most wrong (20-40 stars on nights where cloud broke or closed). Returns
+    [(dt, mid, lo, hi)...] with a ±20% band, or [] when a projection isn't meaningful."""
+    if dawn is None or len(pts) < 3:
+        return []
+    now = pts[-1][0]
+    if now >= dawn - datetime.timedelta(minutes=15):
+        return []
+    base = star_baseline()
+    if not base:
+        return []
+    # Zero-star bins mean the camera saw nothing (cloud, failed extraction), not a thin sky.
+    # Including them drags the sky-state factor down: on tonight's partly-cloudy dusk the
+    # pre-fix s landed at ~0.37 while the sky was actually clear and reading ~58 stars.
+    nz = [(dt, n) for dt, n in pts if n > 0]
+    if len(nz) < 3:
+        return []
+    last_nz = nz[-1][0]
+    if not pts[-1][1] and (now - last_nz) > datetime.timedelta(minutes=30):
+        return []   # effectively overcast right now - nothing sensible to extrapolate
+    # sky state from the last two hours of nonzero bins (rolling window, not wall-clock hours:
+    # tonight's hour 21 held ~35 min of cloud before the clearing and would poison a wall-clock hour)
+    win = [(dt, n) for dt, n in nz if dt >= last_nz - datetime.timedelta(hours=2)]
+    byh = {}
+    for dt, n in win:
+        byh.setdefault(dt.hour, []).append(n)
+    hours = sorted(h for h, v in byh.items() if len(v) >= 4)[-2:]
+    fs = []
+    for h in hours:
+        if h in base:
+            fs.append(statistics.median(byh[h]) / base[h])
+    if not fs:
+        return []
+    s = max(0.15, min(1.1, statistics.median(fs)))
+    # seam: the smoothed current level, not the last (spiky) 3-min max bin
+    cur = hours[-1]
+    seam_v = float(statistics.median(byh[cur])) if len(byh.get(cur, [])) >= 4 else float(nz[-1][1])
+    out = [(now, seam_v, seam_v, seam_v)]
+    h = (now + datetime.timedelta(hours=1)).replace(minute=0, second=0, microsecond=0)
+    while h <= dawn:
+        if h.hour in base:
+            v = s * base[h.hour]
+            out.append((h, v, 0.8 * v, 1.2 * v))
+        h += datetime.timedelta(hours=1)
+    if len(out) < 2:
+        return []
+    dt, m, lo, hi = out[-1]
+    out.append((dawn, m, lo, hi))
+    return out
+
+def star_chart_svg(pts, proj=None, dawn=None):
     """Inline SVG line/area chart of star count vs time, with the plate-solve thresholds as
     labelled status reference lines (same amber/green as the card). Single series -> no legend
-    (the heading names it). Dark-theme only, matching the dashboard; no JS."""
+    (the heading names it). Dark-theme only, matching the dashboard; no JS. proj (from
+    star_projection) is drawn as a dashed continuation with a ±20% band, and the x-axis
+    extends to dawn."""
     if len(pts) < 3:
         return ""
     W, H, ml, mr, mt, mb = 720, 190, 34, 46, 14, 24
     pw, ph = W - ml - mr, H - mt - mb
     t0, t1 = pts[0][0], pts[-1][0]
+    if proj:
+        t1 = max(t1, proj[-1][0])
     span = max((t1 - t0).total_seconds(), 60.0)
     ymax = max(110, ((max(n for _, n in pts) // 10) + 1) * 10)
+    if proj:
+        ymax = max(ymax, ((max(hi for _, _, _, hi in proj) // 10) + 1) * 10)
     X = lambda dt: ml + pw * ((dt - t0).total_seconds() / span)
     Y = lambda n: mt + ph * (1 - min(n, ymax) / ymax)
     pl = " ".join("%.1f,%.1f" % (X(dt), Y(n)) for dt, n in pts)
-    area = "%.1f,%.1f " % (X(t0), mt + ph) + pl + " %.1f,%.1f" % (X(t1), mt + ph)
+    # close the shade under the last OBSERVED point, not the chart edge (t1 reaches dawn when
+    # a projection is drawn) - otherwise the fill slopes to zero across the unobserved span
+    area = "%.1f,%.1f " % (X(t0), mt + ph) + pl + " %.1f,%.1f" % (X(pts[-1][0]), mt + ph)
     thr = ""
     for v, col, lab in [(40, "#e2c98b", "40 recal"), (70, "#a9d97a", "70 solve"), (100, "#7ee29a", "100 ✓")]:
         if v <= ymax:
@@ -434,6 +531,14 @@ def star_chart_svg(pts):
     yax = ("<text x='%.1f' y='%.1f' fill='#8a97ab' font-size='10' text-anchor='end'>%d</text>"
            "<text x='%.1f' y='%.1f' fill='#8a97ab' font-size='10' text-anchor='end'>0</text>"
            % (ml - 4, mt + 9, ymax, ml - 4, mt + ph))
+    pd = ""
+    if proj and len(proj) >= 2:
+        band = (" ".join("%.1f,%.1f" % (X(dt), Y(hi)) for dt, _, _, hi in proj) + " " +
+                " ".join("%.1f,%.1f" % (X(dt), Y(lo)) for dt, _, lo, _ in reversed(proj)))
+        mid = " ".join("%.1f,%.1f" % (X(dt), Y(m)) for dt, m, _, _ in proj)
+        pd = ("<polygon points='%s' fill='#7db4ff' opacity='0.07'/>"
+              "<polyline points='%s' fill='none' stroke='#7db4ff' stroke-width='1.5' "
+              "stroke-dasharray='5 5' stroke-linejoin='round' opacity='0.9'/>" % (band, mid))
     return ("<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 %d %d' "
             "style='width:100%%;max-width:%dpx;height:auto;margin:6px 0' "
             "role='img' aria-label='Star count through tonight'>"
@@ -441,8 +546,8 @@ def star_chart_svg(pts):
             "%s%s"
             "<polygon points='%s' fill='#7db4ff' opacity='0.12'/>"
             "<polyline points='%s' fill='none' stroke='#7db4ff' stroke-width='2' "
-            "stroke-linejoin='round' stroke-linecap='round'/>%s</svg>"
-            % (W, H, W, ml, mt, pw, ph, xt, thr, area, pl, yax))
+            "stroke-linejoin='round' stroke-linecap='round'/>%s%s</svg>"
+            % (W, H, W, ml, mt, pw, ph, xt, thr, area, pl, pd, yax))
 
 PAGE = """<!doctype html><html><head><meta charset=utf-8>
 <meta name=viewport content="width=device-width,initial-scale=1">
@@ -676,9 +781,19 @@ class H(BaseHTTPRequestHandler):
             "<span style='color:#e2c98b'>40–69 recalibration only</span> · "
             "<span style='color:#a9d97a'>70+ solve attempts</span> · "
             "<span style='color:#7ee29a'>100+ reliable solve</span>.</p>")
-        _svg = star_chart_svg(star_history())
+        _pts = star_history()
+        _dusk, _dawn = capture_window()
+        _proj = star_projection(_pts, _dawn)
+        _svg = star_chart_svg(_pts, proj=_proj, dawn=_dawn)
+        _ahead = "%.1f h" % ((_dawn - datetime.datetime.now()).total_seconds() / 3600.0) \
+            if (_dawn and _proj) else ""
+        _pnote = ("<p class=muted style='margin:2px 0;font-size:12px'>Dashed: extrapolated to dawn "
+                  "({ahead} ahead) from the current sky level against this station's clear-sky hour "
+                  "shape, &plusmn;20% band. Assumes the sky holds — not a forecast, and most wrong "
+                  "when cloud breaks or closes later in the night.</p>").format(ahead=_ahead) \
+            if _proj else ""
         star_chart = ("<h3>Star count tonight <span class=muted style='font-size:12px'>· UTC, "
-                      "3-min peak</span></h3>" + _svg) if _svg else ""
+                      "3-min peak</span></h3>" + _svg + _pnote) if _svg else ""
         if hits:
             # clickable grid: each flagged block -> detail page with a video snippet
             # (same idea as /night, but keyed on the FF block since tonight has no

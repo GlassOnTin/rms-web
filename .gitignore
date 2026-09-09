@@ -19,3 +19,6 @@ tle_cache/
 sat_passes.json
 air_passes.json
 detcache/
+
+# local backups
+rms_web.py.bak-*
