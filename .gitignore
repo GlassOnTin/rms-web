@@ -22,3 +22,5 @@ detcache/
 
 # local backups
 rms_web.py.bak-*
+wx_wrf.json
+make_tonight_preview.py.bak-*

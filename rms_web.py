@@ -332,6 +332,12 @@ def recent_stars():
     vals = [int(m) for m in re.findall(r"Detected stars: (\d+)", out)]
     if not vals:
         return None, None
+    # 'Latest' skips interleaved 0s (one cloud band across a single 10 s frame, scintillation) —
+    # but only while they're interleaved. 12 consecutive zero frames (~2 min) means the sky is
+    # genuinely gone: report 0 rather than the last clear count, which would otherwise sit on
+    # the card for the rest of the night reading like a clear sky.
+    if len(vals) >= 12 and not any(vals[-12:]):
+        return 0, 0
     latest = next((v for v in reversed(vals) if v > 0), vals[-1])   # skip the interleaved 0s
     return latest, max(vals[-25:])
 
@@ -361,7 +367,12 @@ def star_history(bin_minutes=3):
         try:
             if os.path.getmtime(lg) < cutoff:
                 continue
-            txt = subprocess.run(["tail", "-n", "20000", lg], capture_output=True, text=True).stdout
+            # grep the star lines directly instead of tail -n: on a cloudy night the
+            # log grows to ~60k+ lines (mostly compression chatter) and a fixed line
+            # tail covered only the last few hours, truncating the chart's left edge.
+            # The 18 h mtime cutoff above bounds how many files are read.
+            txt = subprocess.run(["grep", "-a", "-h", "Detected stars: ", lg],
+                                 capture_output=True).stdout.decode("utf-8", "replace")
         except Exception:
             continue
         for m in rx.finditer(txt):
@@ -489,12 +500,13 @@ def star_projection(pts, dawn):
     out.append((dawn, m, lo, hi))
     return out
 
-def star_chart_svg(pts, proj=None, dawn=None):
+def star_chart_svg(pts, proj=None, dawn=None, dusk=None):
     """Inline SVG line/area chart of star count vs time, with the plate-solve thresholds as
     labelled status reference lines (same amber/green as the card). Single series -> no legend
     (the heading names it). Dark-theme only, matching the dashboard; no JS. proj (from
     star_projection) is drawn as a dashed continuation with a ±20% band, and the x-axis
-    extends to dawn."""
+    extends to dawn. With dusk/dawn given, the axis is pinned to dusk..dawn (same window
+    wx_chart_svg uses, so the two charts' hour gridlines align vertically)."""
     if len(pts) < 3:
         return ""
     W, H, ml, mr, mt, mb = 720, 190, 34, 46, 14, 24
@@ -502,6 +514,11 @@ def star_chart_svg(pts, proj=None, dawn=None):
     t0, t1 = pts[0][0], pts[-1][0]
     if proj:
         t1 = max(t1, proj[-1][0])
+    if dusk and dusk < t1:
+        t0 = dusk
+    if dawn:
+        t1 = dawn
+    pts = [p for p in pts if t0 <= p[0] <= t1] or pts
     span = max((t1 - t0).total_seconds(), 60.0)
     ymax = max(110, ((max(n for _, n in pts) // 10) + 1) * 10)
     if proj:
@@ -548,6 +565,82 @@ def star_chart_svg(pts, proj=None, dawn=None):
             "<polyline points='%s' fill='none' stroke='#7db4ff' stroke-width='2' "
             "stroke-linejoin='round' stroke-linecap='round'/>%s%s</svg>"
             % (W, H, W, ml, mt, pw, ph, xt, thr, area, pl, pd, yax))
+
+def wx_forecast():
+    """Load the meteociel WRF-NMM cache written by the preview daemon (meteociel_wx.py),
+    or None. Kept stdlib-only; decoding happens in the daemon (needs Pillow)."""
+    p = os.path.join(ASSET_DIR, "wx_wrf.json")
+    try:
+        with open(p) as f:
+            wx = json.load(f)
+    except (OSError, ValueError):
+        return None
+    return wx if wx.get("frames") else None
+
+def _wx_parse(ts):
+    # '2026-09-10T03:00Z' -> naive UTC datetime (fromisoformat on 3.10 rejects 'Z')
+    return datetime.datetime.fromisoformat(ts.replace("Z", "+00:00")).replace(tzinfo=None)
+
+def wx_chart_svg(wx, dusk=None, dawn=None):
+    """Three translucent shaded series (high/mid/low cloud cover %) from the meteociel
+    WRF-NMM frames, on a UTC axis spanning dusk->dawn when the capture window is known.
+    Series are drawn high first so the low deck (what matters most for the camera) sits
+    on top. Frame values are hourly model output, not observations."""
+    frames = []
+    for e, fr in wx.get("frames", {}).items():
+        try:
+            frames.append((_wx_parse(fr["valid_utc"]), fr["low"], fr["mid"], fr["high"]))
+        except (KeyError, ValueError):
+            continue
+    frames.sort()
+    if len(frames) < 2:
+        return ""
+    now = datetime.datetime.now()
+    t0, t1 = frames[0][0], frames[-1][0]
+    if dusk and dusk < t1:
+        t0 = max(t0, dusk)
+    if dawn:
+        t1 = min(t1, dawn)
+    pts = [(t, lo, mi, hi) for t, lo, mi, hi in frames if t0 <= t <= t1]
+    if len(pts) < 2:
+        return ""
+    W, H, ml, mr, mt, mb = 720, 170, 34, 46, 14, 24   # ml/mr match star_chart_svg so hour gridlines align
+    pw, ph = W - ml - mr, H - mt - mb
+    span = max((t1 - t0).total_seconds(), 60.0)
+    X = lambda t: ml + pw * ((t - t0).total_seconds() / span)
+    Y = lambda v: mt + ph * (1 - min(v, 100) / 100.0)
+    series = [(2, "#7db4ff", "high"), (1, "#a9d97a", "mid"), (0, "#e28b8b", "low")]
+    sv = ""
+    for idx, col, _name in series:          # high first, so low paints on top
+        pl = " ".join("%.1f,%.1f" % (X(t), Y(v[idx])) for t, *v in pts)
+        area = ("%.1f,%.1f " % (X(pts[0][0]), mt + ph) + pl +
+                " %.1f,%.1f" % (X(pts[-1][0]), mt + ph))
+        sv += ("<polygon points='%s' fill='%s' fill-opacity='0.22' stroke='%s' "
+               "stroke-width='1.5' stroke-opacity='0.9' stroke-linejoin='round'/>"
+               % (area, col, col))
+    xt = ""
+    hh = t0.replace(minute=0, second=0, microsecond=0) + datetime.timedelta(hours=1)
+    while hh < t1:
+        xx = X(hh)
+        xt += ("<line x1='%.1f' y1='%.1f' x2='%.1f' y2='%.1f' stroke='#2a3550' stroke-width='1'/>"
+               "<text x='%.1f' y='%.1f' fill='#8a97ab' font-size='10' text-anchor='middle'>%02d</text>"
+               % (xx, mt, xx, mt + ph, xx, H - 6, hh.hour))
+        hh += datetime.timedelta(hours=1)
+    if t0 <= now <= t1:                     # 'now' marker between the model and the sky
+        xn = X(now)
+        xt += ("<line x1='%.1f' y1='%.1f' x2='%.1f' y2='%.1f' stroke='#8a97ab' "
+               "stroke-width='1' stroke-dasharray='3 3'/>"
+               "<text x='%.1f' y='%.1f' fill='#8a97ab' font-size='10' text-anchor='middle'>now</text>"
+               % (xn, mt, xn, mt + ph, xn, mt + ph + 10))
+    yax = ("<text x='%.1f' y='%.1f' fill='#8a97ab' font-size='10' text-anchor='end'>100%%</text>"
+           "<text x='%.1f' y='%.1f' fill='#8a97ab' font-size='10' text-anchor='end'>0</text>"
+           % (ml - 4, mt + 9, ml - 4, mt + ph))
+    return ("<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 %d %d' "
+            "style='width:100%%;max-width:%dpx;height:auto;margin:6px 0' "
+            "role='img' aria-label='Cloud cover forecast through tonight'>"
+            "<rect x='%d' y='%d' width='%d' height='%d' fill='none' stroke='#1e2740'/>"
+            "%s%s%s</svg>"
+            % (W, H, W, ml, mt, pw, ph, xt, sv, yax))
 
 PAGE = """<!doctype html><html><head><meta charset=utf-8>
 <meta name=viewport content="width=device-width,initial-scale=1">
@@ -784,7 +877,7 @@ class H(BaseHTTPRequestHandler):
         _pts = star_history()
         _dusk, _dawn = capture_window()
         _proj = star_projection(_pts, _dawn)
-        _svg = star_chart_svg(_pts, proj=_proj, dawn=_dawn)
+        _svg = star_chart_svg(_pts, proj=_proj, dawn=_dawn, dusk=_dusk)
         _ahead = "%.1f h" % ((_dawn - datetime.datetime.now()).total_seconds() / 3600.0) \
             if (_dawn and _proj) else ""
         _pnote = ("<p class=muted style='margin:2px 0;font-size:12px'>Dashed: extrapolated to dawn "
@@ -795,6 +888,24 @@ class H(BaseHTTPRequestHandler):
             if _proj else ""
         star_chart = ("<h3>Star count tonight <span class=muted style='font-size:12px'>· UTC, "
                       "3-min peak</span></h3>" + _svg + _pnote) if _svg else ""
+        # Cloud-cover forecast, decoded from the meteociel WRF-NMM maps by the preview
+        # daemon (meteociel_wx.py). Model output at the station pixel — not observed here.
+        _wx = wx_forecast()
+        _wxsvg = wx_chart_svg(_wx, dusk=_dusk, dawn=_dawn) if _wx else ""
+        _wxrun = _wx.get("run_utc", "?") if _wx else ""
+        wx_chart = ""
+        if _wxsvg:
+            wx_chart = ("<h3>Cloud forecast <span class=muted style='font-size:12px'>"
+                        "· Météociel WRF-NMM run {_wxrun} · % at Denmead</span></h3>"
+                        "{_wxsvg}"
+                        "<p class=muted style='margin:2px 0;font-size:12px'>Shaded bands: "
+                        "<span style='color:#e28b8b'>low</span> · "
+                        "<span style='color:#a9d97a'>mid</span> · "
+                        "<span style='color:#7db4ff'>high</span> cloud cover, read off the "
+                        "Météociel WRF-NMM maps at the station's location. A numerical "
+                        "forecast, not measured at this site — cloud edges on the map are "
+                        "coarse, and the camera can see through thin high cloud that the "
+                        "model shows as overcast.</p>").format(_wxrun=_wxrun, _wxsvg=_wxsvg)
         if hits:
             # clickable grid: each flagged block -> detail page with a video snippet
             # (same idea as /night, but keyed on the FF block since tonight has no
@@ -949,6 +1060,7 @@ class H(BaseHTTPRequestHandler):
             + (f"Last frame {stale}s ago." if live else
                "Capture not currently active; showing the most recent built preview.") + "</p>"
             + star_chart
+            + wx_chart
             + f"<h3>Live view <span class=muted style='font-size:12px'>· latest ~10&nbsp;s frame</span></h3>"
             f"<img src='/tonight_latest.png?v={mt('tonight_latest.png')}'>"
             f"<div style='display:flex;gap:16px;flex-wrap:wrap;margin:10px 0'>"

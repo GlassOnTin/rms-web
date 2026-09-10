@@ -28,6 +28,10 @@ try:
     from adsb_overlay import annotate_aircraft, annotate_stack_aircraft  # ADS-B streaks + pass log
 except Exception:
     annotate_aircraft = annotate_stack_aircraft = None
+try:
+    import meteociel_wx                              # WRF-NMM cloud forecast -> wx_wrf.json
+except Exception:
+    meteociel_wx = None
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DATA = os.environ.get("RMS_DATA", "/mnt/nvme/RMS_data")
@@ -301,6 +305,13 @@ def main():
     first_ff_name = meta.get("first_ff_name", "") if meta else ""
     latest_mp = None
     while True:
+        # Cloud-forecast refresh (meteociel_wx.update self-throttles to ~10 min and
+        # never raises — a failed fetch leaves the last good wx_wrf.json in place)
+        if meteociel_wx is not None:
+            try:
+                meteociel_wx.update()
+            except Exception:
+                pass
         d = newest_dir()
         if d is None:
             time.sleep(INTERVAL); continue
