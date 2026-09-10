@@ -596,11 +596,10 @@ def wx_chart_svg(wx, dusk=None, dawn=None):
     if len(frames) < 2:
         return ""
     now = datetime.datetime.now()
-    t0, t1 = frames[0][0], frames[-1][0]
-    if dusk and dusk < t1:
-        t0 = max(t0, dusk)
-    if dawn:
-        t1 = min(t1, dawn)
+    if dusk and dawn:
+        t0, t1 = dusk, dawn     # pinned: the forecast is for the upcoming night, whatever the
+    else:                       # newest run covers yet - partial coverage plots where it can
+        t0, t1 = frames[0][0], frames[-1][0]
     pts = [(t, lo, mi, hi) for t, lo, mi, hi in frames if t0 <= t <= t1]
     if len(pts) < 2:
         return ""
@@ -876,9 +875,19 @@ class H(BaseHTTPRequestHandler):
             "<span style='color:#7ee29a'>100+ reliable solve</span>.</p>")
         _pts = star_history()
         _dusk, _dawn = capture_window()
-        _proj = star_projection(_pts, _dawn)
-        _svg = star_chart_svg(_pts, proj=_proj, dawn=_dawn, dusk=_dusk)
-        _ahead = "%.1f h" % ((_dawn - datetime.datetime.now()).total_seconds() / 3600.0) \
+        _now = datetime.datetime.now()
+        # Daytime: the capture window returned is the upcoming night, but star_history's data is
+        # the night that just ended — pinning the axis to the future window puts the curve
+        # outside the plot box. So by day the chart falls back to its data-driven axis and the
+        # wording says "last night"; at night both charts share the pinned dusk..dawn axis.
+        _day = not (_dusk and _dawn and _dusk <= _now <= _dawn)
+        if _day:
+            _proj = None
+            _svg = star_chart_svg(_pts)
+        else:
+            _proj = star_projection(_pts, _dawn)
+            _svg = star_chart_svg(_pts, proj=_proj, dawn=_dawn, dusk=_dusk)
+        _ahead = "%.1f h" % ((_dawn - _now).total_seconds() / 3600.0) \
             if (_dawn and _proj) else ""
         _pnote = ("<p class=muted style='margin:2px 0;font-size:12px'>Dashed: extrapolated to dawn "
                   "({ahead} ahead) from this camera's own star counts — tonight's live log against "
@@ -886,8 +895,9 @@ class H(BaseHTTPRequestHandler):
                   "involved. &plusmn;20% band, assumes the sky holds. Most wrong when cloud breaks "
                   "or closes later in the night.</p>").format(ahead=_ahead) \
             if _proj else ""
-        star_chart = ("<h3>Star count tonight <span class=muted style='font-size:12px'>· UTC, "
-                      "3-min peak</span></h3>" + _svg + _pnote) if _svg else ""
+        star_chart = ("<h3>Star count {} <span class=muted style='font-size:12px'>· UTC, "
+                      "3-min peak</span></h3>".format("— last night" if _day else "tonight")
+                      + _svg + _pnote) if _svg else ""
         # Cloud-cover forecast, decoded from the meteociel WRF-NMM maps by the preview
         # daemon (meteociel_wx.py). Model output at the station pixel — not observed here.
         _wx = wx_forecast()
@@ -920,16 +930,16 @@ class H(BaseHTTPRequestHandler):
                           f"<div style='font-size:12px;margin-top:4px'>{tmstr} · {n} seg<br>"
                           f"<a href='/tdet?{qs}'>video</a> · <a href='/tdetfull?{qs}' target=_blank>full</a></div></div>")
             dethtml = (f"<details style='margin:16px 0'>"
-                       f"<summary style='cursor:pointer'><b>Detections tonight</b> "
-                       f"<span class=muted>— {len(hits)} live candidate{'s' if len(hits) != 1 else ''} "
+                       f"<summary style='cursor:pointer'><b>Detections {'— last night' if _day else 'tonight'}</b> "
+                       f"<span class=muted>— {len(hits)} candidate{'s' if len(hits) != 1 else ''} "
                        f"({nproc} FF blocks screened){ml_short}, click to expand</span></summary>"
                        f"<p class=muted>Click a block for the video snippet. Pre-ML — most are cloud/"
                        f"aircraft/satellite artefacts the dawn filter removes.{ml_note}</p>"
                        f"<div class=grid>{cards}</div></details>")
         else:
             dethtml = (f"<details style='margin:16px 0'>"
-                       f"<summary style='cursor:pointer'><b>Detections tonight</b> "
-                       f"<span class=muted>— no candidates yet ({nproc} FF blocks screened)</span></summary>"
+                       f"<summary style='cursor:pointer'><b>Detections {'— last night' if _day else 'tonight'}</b> "
+                       f"<span class=muted>— no candidates ({nproc} FF blocks screened)</span></summary>"
                        f"<p class=muted>No meteor candidates yet ({nproc} FF blocks screened so far).</p>"
                        f"</details>")
         # satellite pass log (written by the preview daemon's TLE propagation)
@@ -1061,13 +1071,14 @@ class H(BaseHTTPRequestHandler):
                "Capture not currently active; showing the most recent built preview.") + "</p>"
             + star_chart
             + wx_chart
-            + f"<h3>Live view <span class=muted style='font-size:12px'>· latest ~10&nbsp;s frame</span></h3>"
-            f"<img src='/tonight_latest.png?v={mt('tonight_latest.png')}'>"
+            + f"<h3>Live view <span class=muted style='font-size:12px'>· "
+            + ("last frame before capture ended" if _day else "latest ~10&nbsp;s frame")
+            + f"</span></h3><img src='/tonight_latest.png?v={mt('tonight_latest.png')}'>"
             f"<div style='display:flex;gap:16px;flex-wrap:wrap;margin:10px 0'>"
             + star_card
             + f"<div class=card><b>{d['count']}</b><br><span class=muted>FF blocks (256 fr each)</span></div>"
             f"<div class=card><b>{d['frames']:,}</b><br><span class=muted>frames</span></div>"
-            f"<div class=card><b>{d['duration_min']:.0f} min</b><br><span class=muted>captured tonight</span></div>"
+            f"<div class=card><b>{d['duration_min']:.0f} min</b><br><span class=muted>captured {'last night' if _day else 'tonight'}</span></div>"
             f"<div class=card><b>{ncand}</b><br><span class=muted>meteor candidates (pre-ML)</span></div>"
             f"</div>"
             + star_legend
@@ -1081,7 +1092,7 @@ class H(BaseHTTPRequestHandler):
               f"astrometry adjudicate at dawn.</p>"
               f"<img src='/tonight_detected.png?v={mt('tonight_detected.png')}'>")
              if d.get("det_blocks", 0) > 0 and mt("tonight_detected.png") else "") +
-            f"<h3>Night so far — cumulative stack</h3>"
+            f"<h3>{'Last night' if _day else 'Night so far'} — cumulative stack</h3>"
             + ((f"<p class=muted>Every star trail, satellite and meteor caught since "
                 f"{html.escape(d['first_ff'])} (through {html.escape(d['last_ff'])}). Live preview — "
                 f"RMS builds the clean final stack at dawn. Overlay: <span style='color:#78c8ff'>stars</span>, "
