@@ -30,8 +30,9 @@ import sys
 from datetime import timedelta
 
 # Editable-install RMS resolves from anywhere, but be explicit to dodge the
-# ~/source namespace-dir shadowing gotcha (see rms_ml_crops.py).
-sys.path.insert(0, os.path.expanduser("~/source/RMS"))
+# ~/source namespace-dir shadowing gotcha (see rms_ml_crops.py). RMS_SOURCE
+# overrides it for non-default clones (e.g. the fireball 2nd instance).
+sys.path.insert(0, os.environ.get("RMS_SOURCE", os.path.expanduser("~/source/RMS")))
 
 import numpy as np
 from PIL import Image

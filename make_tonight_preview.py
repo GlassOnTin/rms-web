@@ -14,6 +14,8 @@ Needs the RMS venv (RMS.Formats, numpy, pillow). One iteration per ~20 s.
 import os, glob, json, time, sys, datetime
 import numpy as np
 from PIL import Image
+# RMS clone location (the fireball instance runs against ~/source/RMS-fireball)
+sys.path.insert(0, os.environ.get("RMS_SOURCE", os.path.expanduser("~/source/RMS")))
 from RMS.Formats import FFfile
 try:
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -47,13 +49,20 @@ REBUILD_FLAG = os.path.join(HERE, ".tonight_rebuild_request")   # touched by the
 INTERVAL = int(os.environ.get("TONIGHT_INTERVAL", "20"))
 
 # Clear-sky gate: a frame enters the cumulative stack only if the sky is dark (low avepixel
-# median) AND not hazy/moonlit (maxpixel median below the intrinsic ~30-35 ADU sensor floor
+# median) AND not hazy/moonlit (maxpixel median below the intrinsic sensor floor
 # plus margin). See the gate comment in main().
-CLEAR_AVE_MAX, CLEAR_MAXPIX_MED = 8.0, 45.0
+_DEF_AVE, _DEF_MAX = ("8.0", "45.0") if DATA == "/mnt/nvme/RMS_data" else ("118.0", "134.0")
+CLEAR_AVE_MAX = float(os.environ.get("CLEAR_AVE_MAX", _DEF_AVE))
+CLEAR_MAXPIX_MED = float(os.environ.get("CLEAR_MAXPIX_MED", _DEF_MAX))
+
+def _night_datekey(path):
+    name = os.path.basename(path)
+    p = name.split("_")
+    return p[1] + "_" + p[2] if len(p) >= 3 else name
 
 def newest_dir():
     ds = [d for d in glob.glob(os.path.join(CAP, "*")) if os.path.isdir(d)]
-    return max(ds, key=os.path.basename) if ds else None
+    return max(ds, key=_night_datekey) if ds else None
 
 _stretch_stats = {}   # per-role EMA of (bg, nz, hi), so display gain can't pump
 

@@ -24,6 +24,11 @@ ALLOWED_EXT = {".jpg", ".jpeg", ".png", ".gif", ".mp4", ".txt", ".log"}
 DETCACHE = os.path.join(ASSET_DIR, "detcache")
 DETGEN = os.path.join(ASSET_DIR, "detection_media.py")
 VENV_PY = os.path.expanduser(os.environ.get("RMS_WEB_VENV_PY", "~/vRMS/bin/python3"))
+# systemd capture unit to report status for (2nd instances run their own unit name)
+CAPTURE_SERVICE = os.environ.get("RMS_CAPTURE_SERVICE", "rms-capture")
+# Calibration UI + solvers (tilt/bump/refit) are wired to the main station's
+# RMS clone and .config; a 2nd instance without its own calibration keeps them off.
+CALIB_TOOLS = os.environ.get("RMS_WEB_CALIB", "1" if CAPTURE_SERVICE == "rms-capture" else "0") == "1"
 
 def rms_cfg(key, default=None):
     """Read a key (e.g. stationID) from the RMS .config so the header tracks the live station code."""
@@ -176,10 +181,11 @@ def capture_status():
             return subprocess.run(["systemctl", "is-active", s], capture_output=True, text=True).stdout.strip()
         except Exception:
             return "?"
-    cap = active("rms-capture")
+    cap = active(CAPTURE_SERVICE)
     # newest capturing night (may be tonight, pre-processing)
     try:
-        cur = sorted([d for d in os.listdir(ARCHIVED) if os.path.isdir(os.path.join(ARCHIVED, d))], reverse=True)
+        cur = sorted([d for d in os.listdir(ARCHIVED) if os.path.isdir(os.path.join(ARCHIVED, d))],
+                     key=_night_datekey, reverse=True)
         cur = cur[0] if cur else "—"
     except FileNotFoundError:
         cur = "—"
@@ -252,15 +258,18 @@ def ukmon_status():
 
 
 def capture_window():
-    """Tonight's planned capture window from the newest RMS log: StartCapture
+    """Tonight's planned capture window from the newest RMS logs: StartCapture
     logs 'Next start time: ... UTC' (dusk) and '... to start recording for X hrs'
     (dawn = start + duration). Reuses RMS's own ephemeris decision instead of
     recomputing sun altitudes here. After dawn the log's last 'Next start time'
-    already points at the following dusk, which is what the waiting state wants."""
+    already points at the following dusk, which is what the waiting state wants.
+    Reads the last 3 rotated log files so mid-night TimedRotatingFileHandler
+    rollovers don't drop the dusk start message."""
     try:
         logs = os.path.join(ROOT, "logs")
-        cur = sorted(f for f in os.listdir(logs) if f.startswith("log_") and f.endswith(".log"))[-1]
-        txt = open(os.path.join(logs, cur), errors="replace").read()
+        recent = sorted((f for f in os.listdir(logs) if f.startswith("log_") and f.endswith(".log")),
+                        key=_night_datekey)[-3:]
+        txt = "".join(open(os.path.join(logs, f), errors="replace").read() for f in recent)
         starts = re.findall(r"Next start time: (\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})", txt)
         hrs = re.findall(r"to start recording for ([\d.]+) hrs", txt)
         if not starts:
@@ -277,7 +286,7 @@ def ml_retention(n_nights=6):
     which needs the capture-time detection context), so /tonight shows the raw pre-ML count with
     this data-backed 'expect ~N real' instead. Returns {ratio, rows:[(unf,final)...]} or None."""
     rows, tot_u, tot_f = [], 0, 0
-    for d in sorted(glob.glob(os.path.join(ARCH_DET, "UK00DY_*")), key=os.path.getmtime, reverse=True):
+    for d in sorted(glob.glob(os.path.join(ARCH_DET, STATION_NAME + "_*")), key=os.path.getmtime, reverse=True):
         name = os.path.basename(d)
         unf = os.path.join(d, "FTPdetectinfo_%s_unfiltered.txt" % name)
         fin = os.path.join(d, "FTPdetectinfo_%s.txt" % name)
@@ -301,31 +310,48 @@ def ml_retention(n_nights=6):
     return {"ratio": tot_f/tot_u, "rows": rows, "tot_u": tot_u, "tot_f": tot_f}
 
 def tonight_detections():
-    """Live meteor candidates from the newest RMS log: per-FF 'detected meteors: N'
-    lines emitted by the real-time detector (pre-ML; the ML filter prunes at dawn)."""
+    """Live meteor candidates from the newest RMS logs: per-FF 'detected meteors: N'
+    lines emitted by the real-time detector (pre-ML; the ML filter prunes at dawn).
+    Spans mid-night log rotations and filters to the latest noon-to-noon UTC night."""
     try:
         logs = os.path.join(ROOT, "logs")
-        cur = sorted(f for f in os.listdir(logs) if f.startswith("log_") and f.endswith(".log"))[-1]
-        out = subprocess.run(["grep", "-F", "detected meteors:", os.path.join(logs, cur)],
+        recent = [os.path.join(logs, f) for f in sorted(
+            (f for f in os.listdir(logs) if f.startswith("log_") and f.endswith(".log")),
+            key=_night_datekey)[-3:]]
+        out = subprocess.run(["grep", "-h", "-F", "detected meteors:", *recent],
                              capture_output=True, text=True).stdout
     except Exception:
         return 0, []
-    total, hits = 0, []
-    for m in re.finditer(r"(FF_\S+\.fits) detected meteors: (\d+)", out):
+    entries = [(m.group(1), int(m.group(2)))
+               for m in re.finditer(r"(FF_\S+\.fits) detected meteors: (\d+)", out)]
+    if not entries:
+        return 0, []
+    last_key = _night_datekey(entries[-1][0])
+    try:
+        last_dt = datetime.datetime.strptime(last_key, "%Y%m%d_%H%M%S")
+        noon_cut = ((last_dt - datetime.timedelta(hours=12)).strftime("%Y%m%d") + "_120000")
+    except ValueError:
+        noon_cut = ""
+    total, hits, seen = 0, [], set()
+    for ff, n in entries:
+        if _night_datekey(ff) < noon_cut or ff in seen:
+            continue
+        seen.add(ff)
         total += 1
-        n = int(m.group(2))
         if n:
-            hits.append((m.group(1), n))
+            hits.append((ff, n))
     return total, hits
 
 def recent_stars():
-    """Latest and recent-peak 'Detected stars: N' from the current RMS log — a live sky-clarity
+    """Latest and recent-peak 'Detected stars: N' from the current RMS logs — a live sky-clarity
     readout. RMS already extracts this per FF block during capture, so surfacing it is free (we
-    just tail the log, no reprocessing). Returns (latest_nonzero, recent_peak) or (None, None)."""
+    just tail the logs, no reprocessing). Returns (latest_nonzero, recent_peak) or (None, None)."""
     try:
         logs = os.path.join(ROOT, "logs")
-        cur = sorted(f for f in os.listdir(logs) if f.startswith("log_") and f.endswith(".log"))[-1]
-        out = subprocess.run(["tail", "-n", "400", os.path.join(logs, cur)],
+        recent = [os.path.join(logs, f) for f in sorted(
+            (f for f in os.listdir(logs) if f.startswith("log_") and f.endswith(".log")),
+            key=_night_datekey)[-2:]]
+        out = subprocess.run(["tail", "-q", "-n", "400", *recent],
                              capture_output=True, text=True).stdout
     except Exception:
         return None, None
@@ -363,7 +389,7 @@ def star_history(bin_minutes=3):
     rx = re.compile(r"(\d{4})/(\d\d)/(\d\d) (\d\d):(\d\d):(\d\d).*?Detected stars: (\d+)")
     cutoff = time.time() - 18 * 3600
     raw = []
-    for lg in glob.glob(os.path.join(ROOT, "logs", "log_UK00DY_*.log")):
+    for lg in glob.glob(os.path.join(ROOT, "logs", "log_%s_*.log" % STATION_NAME)):
         try:
             if os.path.getmtime(lg) < cutoff:
                 continue
@@ -427,7 +453,7 @@ def star_baseline():
     if STAR_BASE["base"] is not None and time.time() - STAR_BASE["at"] < 3600:
         return STAR_BASE["base"]
     base = {}
-    for d in glob.glob(os.path.join(ARCH_DET, "UK00DY_%s*" % STAR_BASE_SINCE)):
+    for d in glob.glob(os.path.join(ARCH_DET, STATION_NAME + "_%s*" % STAR_BASE_SINCE)):
         pts = star_history_calstars(d, bin_minutes=3)
         if len(pts) < 100:
             continue
@@ -743,6 +769,10 @@ class H(BaseHTTPRequestHandler):
 
     def do_POST(self):
         u = urllib.parse.urlparse(self.path)
+        # Calibration solvers are only exposed when RMS_WEB_CALIB is set (they are
+        # wired to one station's RMS clone; a 2nd instance must not spawn them).
+        if u.path in ("/plate_solve", "/refit_distortion", "/bump_solve") and not CALIB_TOOLS:
+            return self._send(404, "text/plain", b"not found")
         # Request a full rebuild of tonight's cumulative stack. The web app is read-only, so
         # rather than orchestrating the daemon (it can't sudo/restart it), it drops a flag file
         # that the preview daemon picks up on its next loop and rebuilds in-process.
@@ -773,7 +803,7 @@ class H(BaseHTTPRequestHandler):
     def _spawn_calib(script):
         try:
             env = dict(os.environ, FORCE="1")
-            subprocess.Popen(["/home/ian/vRMS/bin/python", script], env=env,
+            subprocess.Popen([VENV_PY, script], env=env,
                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                              start_new_session=True)
         except Exception:
@@ -1106,7 +1136,7 @@ class H(BaseHTTPRequestHandler):
                if d.get("stack_built") and mt("tonight_stack.png") else
                f"<p class=muted>No clear-sky frames in tonight's stack yet — the cumulative "
                f"stack appears once the sky clears.</p>")
-            + calib_ctrl
+            + (calib_ctrl if CALIB_TOOLS else "")
             + rebuild_ctrl)          # rebuild control at the very end of the page
         self.page("Tonight", body, refresh)
 

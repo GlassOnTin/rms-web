@@ -17,7 +17,7 @@ import os, sys
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
-sys.path.insert(0, "/home/ian/source/RMS")
+sys.path.insert(0, os.environ.get("RMS_SOURCE", "/home/ian/source/RMS"))
 import ephem
 from RMS.Astrometry.ApplyAstrometry import raDecToXYPP
 from RMS.Astrometry.Conversions import date2JD, altAz2RADec, raDec2AltAz
