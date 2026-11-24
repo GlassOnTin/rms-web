@@ -21,7 +21,8 @@ ALLOWED_EXT = {".jpg", ".jpeg", ".png", ".gif", ".mp4", ".txt", ".log"}
 # Per-detection media (thumbnails / full frames / FF-reconstruction clips) is
 # produced lazily by detection_media.py under the RMS venv (this server stays
 # stdlib-only) and cached here, keyed on the night's FTPdetectinfo mtime.
-DETCACHE = os.path.join(ASSET_DIR, "detcache")
+DETCACHE = os.environ.get("RMS_WEB_DETCACHE") or os.path.join(ASSET_DIR, "detcache")
+DET_INDEX_VERSION = 2
 DETGEN = os.path.join(ASSET_DIR, "detection_media.py")
 VENV_PY = os.path.expanduser(os.environ.get("RMS_WEB_VENV_PY", "~/vRMS/bin/python3"))
 # systemd capture unit to report status for (2nd instances run their own unit name)
@@ -108,15 +109,23 @@ def _det_gen(mode, night_dir, cache_dir, *args, timeout=300):
 
 def det_index(name):
     """(night_dir, cache_dir, index dict or None) for a night; (re)builds the
-    thumbnail index when missing or when FTPdetectinfo has been reprocessed."""
+    v2 index (confirmed detections, unfiltered KHT candidates, FR raw clips,
+    and captured FF availability) when missing or stale."""
     night_dir = real_within(ARCH_DET, name)
     if not night_dir or not os.path.isdir(night_dir):
         return None, None, None
-    ftp = os.path.join(night_dir, "FTPdetectinfo_{}.txt".format(os.path.basename(night_dir)))
-    cache_dir = os.path.join(DETCACHE, os.path.basename(night_dir))
+    base = os.path.basename(night_dir)
+    ftp = os.path.join(night_dir, "FTPdetectinfo_{}.txt".format(base))
+    unf = os.path.join(night_dir, "FTPdetectinfo_{}_unfiltered.txt".format(base))
+    mtimes = [int(os.path.getmtime(p)) for p in (ftp, unf) if os.path.isfile(p)]
+    has_fr = any(f.startswith("FR_") and f.endswith(".bin") for f in os.listdir(night_dir))
+    if not mtimes and not has_fr:
+        return night_dir, os.path.join(DETCACHE, base), None
+    src_mtime = max(mtimes) if mtimes else 0
+    cap_dir = real_within(ARCHIVED, base)
+    cap_present = bool(cap_dir and os.path.isdir(cap_dir))
+    cache_dir = os.path.join(DETCACHE, base)
     jp = os.path.join(cache_dir, "detections.json")
-    if not os.path.isfile(ftp):
-        return night_dir, cache_dir, None
     with _det_lock(name):
         idx = None
         if os.path.isfile(jp):
@@ -124,7 +133,11 @@ def det_index(name):
                 idx = json.load(open(jp))
             except (OSError, ValueError):
                 idx = None
-        if idx is None or idx.get("src_mtime") != int(os.path.getmtime(ftp)):
+        stale = (idx is None
+                 or idx.get("version") != DET_INDEX_VERSION
+                 or idx.get("src_mtime") != src_mtime
+                 or (bool(idx.get("captured_available")) != cap_present))
+        if stale:
             idx = None
             if _det_gen("index", night_dir, cache_dir):
                 try:
@@ -133,23 +146,153 @@ def det_index(name):
                     idx = None
     return night_dir, cache_dir, idx
 
-def det_media(name, i, kind):
-    """Absolute path of detection i's 'video'/'full'/'thumb' file, generating
-    video/full on first request. None if the night/index/FF is unavailable."""
+def det_media(name, i, kind, group="detections"):
+    """Absolute path of detection i's thumb/full/ann/resid/video/cropvideo file
+    in group ('detections' or 'unfiltered'), generating lazily on first request."""
     night_dir, cache_dir, idx = det_index(name)
-    if not idx or not (0 <= i < len(idx.get("detections", []))):
+    entries = (idx or {}).get(group, [])
+    if not idx or not (0 <= i < len(entries)):
         return None
-    d = idx["detections"][i]
+    d = entries[i]
+    if kind not in d:
+        return None
     p = os.path.join(cache_dir, d[kind])
-    if not os.path.isfile(p) and kind in ("video", "full") and d.get("has_ff"):
+    if not os.path.isfile(p) and d.get("has_ff"):
         with _det_lock(name):
             if not os.path.isfile(p):
-                _det_gen(kind, night_dir, cache_dir, i)
+                if kind == "thumb":
+                    _det_gen("index", night_dir, cache_dir)
+                else:
+                    _det_gen(kind, night_dir, cache_dir, group, i)
+    return p if os.path.isfile(p) else None
+
+def fr_media(name, f_idx, kind):
+    """Absolute path of FR_*.bin clip f_idx's thumb/full/video/cropvideo file."""
+    night_dir, cache_dir, idx = det_index(name)
+    clips = (idx or {}).get("fr_clips", [])
+    if not idx or not (0 <= f_idx < len(clips)):
+        return None
+    fc = clips[f_idx]
+    if kind not in fc:
+        return None
+    p = os.path.join(cache_dir, fc[kind])
+    mode_map = {"full": "frfull", "video": "frvid", "cropvideo": "frcropvid"}
+    if not os.path.isfile(p) and kind in mode_map:
+        with _det_lock(name + ":fr"):
+            if not os.path.isfile(p):
+                _det_gen(mode_map[kind], night_dir, cache_dir, f_idx)
     return p if os.path.isfile(p) else None
 
 def _blk_base(ff):
     """Cache basename for a flagged block — must match detection_media.blockBase."""
-    return "blk_" + ff.replace("FF_UK00DY_", "").replace("FF_", "").replace(".fits", "")[:20]
+    stem = ff[3:] if ff.startswith("FF_") else ff
+    parts = stem.replace(".fits", "").split("_")
+    if len(parts) >= 4 and len(parts[1]) == 8 and parts[1].isdigit():
+        core = "_".join(parts[1:])
+    else:
+        core = stem.replace(".fits", "")
+    return "blk_" + core[:20]
+
+def _ff_datetime(ff_name):
+    """Parse FF_<STATION>_YYYYMMDD_HHMMSS_mmm_NNNNNNN.fits -> datetime or None."""
+    m = re.match(r"^FF_[A-Za-z0-9]+_(\d{8})_(\d{6})_(\d{3})_\d+\.fits$", ff_name or "")
+    if not m:
+        return None
+    try:
+        dt = datetime.datetime.strptime(m.group(1) + m.group(2), "%Y%m%d%H%M%S")
+        return dt + datetime.timedelta(milliseconds=int(m.group(3)))
+    except ValueError:
+        return None
+
+def list_night_ffs(name):
+    """Sorted unique FF_*.fits filenames available for `name` (CapturedFiles + ArchivedFiles)."""
+    night_dir = real_within(ARCH_DET, name)
+    if not night_dir or not os.path.isdir(night_dir):
+        return []
+    cap_dir = real_within(ARCHIVED, os.path.basename(night_dir))
+    seen = set()
+    for d in (cap_dir, night_dir):
+        if d and os.path.isdir(d):
+            try:
+                for f in os.listdir(d):
+                    if f.startswith("FF_") and f.endswith(".fits") and _ff_datetime(f):
+                        seen.add(f)
+            except OSError:
+                pass
+    return sorted(seen, key=_night_datekey)
+
+def resolve_night_ff(name, ff_param="", time_param=""):
+    """Resolve either an explicit `FF_*.fits` or a UTC time (`HH:MM:SS` / `HH:MM`) to
+    `(ff_name, prev_ff, next_ff, total_count, delta_s)` within `name`."""
+    ffs = list_night_ffs(name)
+    if not ffs:
+        return None, None, None, 0, 0.0
+    chosen, delta_s = None, 0.0
+    if ff_param and re.match(r"^FF_[A-Za-z0-9_]+\.fits$", ff_param):
+        if ff_param in ffs:
+            chosen = ff_param
+    elif time_param:
+        s = time_param.strip().upper().replace("UTC", "").replace("UT", "").strip()
+        if s.startswith("FF_") and s.endswith(".FITS"):
+            for f in ffs:
+                if f.upper() == s:
+                    chosen = f
+                    break
+        else:
+            m = re.match(r"^(\d{1,2}):(\d{2})(?::(\d{2})(?:\.(\d+))?)?$", s)
+            if m:
+                hh, mm = int(m.group(1)), int(m.group(2))
+                ss = int(m.group(3) or 0)
+                frac = float("0." + m.group(4)) if m.group(4) else 0.0
+                if 0 <= hh < 24 and 0 <= mm < 60 and 0 <= ss < 60:
+                    # Match against each FF block's [t0, t0 + 10.3 s] window across dusk->dawn rollover
+                    best_f, best_abs = None, 9e9
+                    for f in ffs:
+                        dt = _ff_datetime(f)
+                        if not dt:
+                            continue
+                        cand = dt.replace(hour=hh, minute=mm, second=ss, microsecond=int(frac * 1e6))
+                        # Handle midnight boundary cleanly if cand differs by ~24h
+                        for shift_d in (-1, 0, 1):
+                            c2 = cand + datetime.timedelta(days=shift_d)
+                            # Offset from block start; blocks span ~10.24 s
+                            off = (c2 - dt).total_seconds()
+                            dist = 0.0 if (0.0 <= off <= 10.35) else min(abs(off), abs(off - 10.24))
+                            if dist < best_abs:
+                                best_abs = dist
+                                best_f = f
+                                delta_s = off
+                    if best_f and best_abs <= 600.0:
+                        chosen = best_f
+    if not chosen:
+        return None, None, None, len(ffs), 0.0
+    pos = ffs.index(chosen)
+    prev_ff = ffs[pos - 1] if pos > 0 else None
+    next_ff = ffs[pos + 1] if pos < len(ffs) - 1 else None
+    return chosen, prev_ff, next_ff, len(ffs), delta_s
+
+def night_block_media(name, ff, kind):
+    """Path to an archived/captured night FF block's thumb/full/ann/resid/video."""
+    if not re.match(r"^FF_[A-Za-z0-9_]+\.fits$", ff or ""):
+        return None
+    night_dir = real_within(ARCH_DET, name)
+    if not night_dir or not os.path.isdir(night_dir):
+        return None
+    base = os.path.basename(night_dir)
+    cap_dir = real_within(ARCHIVED, base)
+    exists = (os.path.isfile(os.path.join(night_dir, ff))
+              or bool(cap_dir and os.path.isfile(os.path.join(cap_dir, ff))))
+    if not exists:
+        return None
+    cache_dir = os.path.join(DETCACHE, base)
+    suffix = {"thumb": "_thumb.jpg", "full": "_full.jpg", "ann": "_ann.jpg",
+              "resid": "_resid.jpg", "video": ".mp4"}[kind]
+    p = os.path.join(cache_dir, _blk_base(ff) + suffix)
+    if not os.path.isfile(p):
+        with _det_lock("nblk:" + base + ":" + ff):
+            if not os.path.isfile(p):
+                _det_gen("block" + kind, night_dir, cache_dir, ff)
+    return p if os.path.isfile(p) else None
 
 def tonight_block_media(ff, kind):
     """Path to a live flagged-block's thumb/video/full for /tonight, generating
@@ -667,6 +810,299 @@ def wx_chart_svg(wx, dusk=None, dawn=None):
             "%s%s%s</svg>"
             % (W, H, W, ml, mt, pw, ph, xt, sv, yax))
 
+def det_lightcurve_svg(d):
+    """Inline dark-theme SVG light curve: Apparent Magnitude (inverted, brightest up)
+    or Integrated Intensity on left axis, overlaid with SNR (dashed green) on right axis."""
+    segs = d.get("segments") or []
+    if len(segs) < 2:
+        return ""
+    W, H, ml, mr, mt, mb = 720, 185, 46, 48, 16, 26
+    pw, ph = W - ml - mr, H - mt - mb
+    f0, f1 = segs[0]["fr"], segs[-1]["fr"]
+    fspan = max(f1 - f0, 1.0)
+    X = lambda fr: ml + pw * ((fr - f0) / fspan)
+
+    mags = [s["mag"] for s in segs if s.get("mag") is not None]
+    use_mag = bool(d.get("has_mag")) and len(mags) >= 2
+    if use_mag:
+        m_hi = min(mags) - 0.35   # brightest (top)
+        m_lo = max(mags) + 0.35   # faintest (bottom)
+        if m_lo - m_hi < 1.0:
+            mid = 0.5 * (m_lo + m_hi)
+            m_hi, m_lo = mid - 0.5, mid + 0.5
+        Y1 = lambda s: mt + ph * ((s["mag"] - m_hi) / (m_lo - m_hi))
+        pts1 = [(s["fr"], Y1(s), s) for s in segs if s.get("mag") is not None]
+        y1_top = "%+.1fm" % m_hi
+        y1_bot = "%+.1fm" % m_lo
+    else:
+        imax = max(max((s.get("inten") or 0) for s in segs), 10) * 1.12
+        Y1 = lambda s: mt + ph * (1.0 - min(s.get("inten") or 0, imax) / imax)
+        pts1 = [(s["fr"], Y1(s), s) for s in segs]
+        y1_top = "%d" % int(round(imax))
+        y1_bot = "0"
+
+    smax = max(max((s.get("snr") or 0.0) for s in segs), 5.0) * 1.15
+    Y2 = lambda snr: mt + ph * (1.0 - min(snr, smax) / smax)
+
+    grid = ""
+    n_ticks = min(6, max(2, len(segs) - 1))
+    for k in range(n_ticks + 1):
+        fr_t = f0 + fspan * (k / float(n_ticks))
+        xx = X(fr_t)
+        dt_s = (fr_t - f0) / float(d.get("fps") or 25.0)
+        grid += ("<line x1='%.1f' y1='%d' x2='%.1f' y2='%d' stroke='#1e2740' stroke-width='1'/>"
+                 "<text x='%.1f' y='%d' fill='#8a97ab' font-size='10' text-anchor='middle'>f%.0f (+%.2fs)</text>"
+                 % (xx, mt, xx, mt + ph, xx, H - 6, fr_t, dt_s))
+    for frac in (0.25, 0.5, 0.75):
+        yy = mt + ph * frac
+        grid += "<line x1='%d' y1='%.1f' x2='%d' y2='%.1f' stroke='#1a2236' stroke-dasharray='3 3'/>" % (
+            ml, yy, ml + pw, yy)
+
+    pl1 = " ".join("%.1f,%.1f" % (X(fr), yy) for fr, yy, _ in pts1)
+    area1 = ("%.1f,%d " % (X(pts1[0][0]), mt + ph)) + pl1 + (" %.1f,%d" % (X(pts1[-1][0]), mt + ph))
+    dots1 = ""
+    pk_fr = d.get("peak_frame")
+    for fr, yy, s in pts1:
+        is_pk = pk_fr is not None and abs(fr - pk_fr) < 0.05
+        col = "#ffd25a" if is_pk else ("#ff8c64" if s.get("sat", 0) > 0 else "#7db4ff")
+        r = 4.2 if is_pk else 2.6
+        dots1 += "<circle cx='%.1f' cy='%.1f' r='%.1f' fill='%s'/>" % (X(fr), yy, r, col)
+
+    pl2 = " ".join("%.1f,%.1f" % (X(s["fr"]), Y2(s.get("snr") or 0.0)) for s in segs)
+    axes = (
+        "<text x='%d' y='%d' fill='#7db4ff' font-size='10' text-anchor='end'>%s</text>"
+        "<text x='%d' y='%d' fill='#7db4ff' font-size='10' text-anchor='end'>%s</text>"
+        "<text x='%d' y='%d' fill='#a9d97a' font-size='10'>SNR %.0f</text>"
+        "<text x='%d' y='%d' fill='#a9d97a' font-size='10'>0</text>"
+        % (ml - 5, mt + 9, y1_top, ml - 5, mt + ph, y1_bot,
+           ml + pw + 4, mt + 9, smax, ml + pw + 4, mt + ph)
+    )
+    return (
+        "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 %d %d' "
+        "style='width:100%%;max-width:%dpx;height:auto;margin:6px 0' role='img' aria-label='Light curve'>"
+        "<rect x='%d' y='%d' width='%d' height='%d' fill='#0d1220' stroke='#1e2740'/>"
+        "%s"
+        "<polygon points='%s' fill='#7db4ff' opacity='0.14'/>"
+        "<polyline points='%s' fill='none' stroke='#a9d97a' stroke-width='1.4' stroke-dasharray='4 3' opacity='0.85'/>"
+        "<polyline points='%s' fill='none' stroke='#7db4ff' stroke-width='2' stroke-linejoin='round'/>"
+        "%s%s</svg>"
+        % (W, H, W, ml, mt, pw, ph, grid, area1, pl2, pl1, dots1, axes)
+    )
+
+
+def det_kinematics_svg(d):
+    """Inline dark-theme SVG of cross-track centroid residual (px, left axis) and
+    frame-to-frame speed (px/frame, right axis) across the track."""
+    segs = d.get("segments") or []
+    if len(segs) < 3:
+        return ""
+    W, H, ml, mr, mt, mb = 720, 165, 46, 48, 14, 24
+    pw, ph = W - ml - mr, H - mt - mb
+    f0, f1 = segs[0]["fr"], segs[-1]["fr"]
+    fspan = max(f1 - f0, 1.0)
+    X = lambda fr: ml + pw * ((fr - f0) / fspan)
+
+    cmax = max(2.0, max(abs(s.get("cross_px") or 0.0) for s in segs) * 1.25)
+    Yc = lambda c: mt + ph * (0.5 - (c / (2.0 * cmax)))
+    smax = max(2.0, max((s.get("spd_px") or 0.0) for s in segs) * 1.2)
+    Ys = lambda v: mt + ph * (1.0 - min(v, smax) / smax)
+
+    mid_y = Yc(0.0)
+    band = ""
+    if 1.0 < cmax:
+        y_p1, y_m1 = Yc(1.0), Yc(-1.0)
+        band = ("<rect x='%d' y='%.1f' width='%d' height='%.1f' fill='#7ee29a' opacity='0.06'/>"
+                % (ml, y_p1, pw, y_m1 - y_p1))
+    plc = " ".join("%.1f,%.1f" % (X(s["fr"]), Yc(s.get("cross_px") or 0.0)) for s in segs)
+    pls = " ".join("%.1f,%.1f" % (X(s["fr"]), Ys(s.get("spd_px") or 0.0)) for s in segs)
+    dots = "".join("<circle cx='%.1f' cy='%.1f' r='2.5' fill='#7ee29a'/>"
+                   % (X(s["fr"]), Yc(s.get("cross_px") or 0.0)) for s in segs)
+    axes = (
+        "<line x1='%d' y1='%.1f' x2='%d' y2='%.1f' stroke='#2f4a63' stroke-dasharray='4 4'/>"
+        "<text x='%d' y='%d' fill='#7ee29a' font-size='10' text-anchor='end'>+%.1fpx</text>"
+        "<text x='%d' y='%.1f' fill='#8a97ab' font-size='10' text-anchor='end'>0</text>"
+        "<text x='%d' y='%d' fill='#7ee29a' font-size='10' text-anchor='end'>−%.1fpx</text>"
+        "<text x='%d' y='%d' fill='#e2c98b' font-size='10'>%.1f px/f</text>"
+        "<text x='%d' y='%d' fill='#e2c98b' font-size='10'>0</text>"
+        % (ml, mid_y, ml + pw, mid_y,
+           ml - 5, mt + 9, cmax, ml - 5, mid_y + 3, ml - 5, mt + ph, cmax,
+           ml + pw + 4, mt + 9, smax, ml + pw + 4, mt + ph)
+    )
+    return (
+        "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 %d %d' "
+        "style='width:100%%;max-width:%dpx;height:auto;margin:6px 0' role='img' aria-label='Track linearity'>"
+        "<rect x='%d' y='%d' width='%d' height='%d' fill='#0d1220' stroke='#1e2740'/>"
+        "%s%s"
+        "<polyline points='%s' fill='none' stroke='#e2c98b' stroke-width='1.4' stroke-dasharray='4 3' opacity='0.85'/>"
+        "<polyline points='%s' fill='none' stroke='#7ee29a' stroke-width='1.8' stroke-linejoin='round'/>"
+        "%s</svg>"
+        % (W, H, W, ml, mt, pw, ph, band, axes, pls, plc, dots)
+    )
+
+
+def fr_lightcurve_svg(fc):
+    """Inline SVG for an FR_*.bin raw cutout's per-frame integrated flux & peak pixel ADU."""
+    frs = fc.get("frames") or []
+    if len(frs) < 2:
+        return ""
+    W, H, ml, mr, mt, mb = 720, 180, 50, 46, 16, 26
+    pw, ph = W - ml - mr, H - mt - mb
+    f0, f1 = frs[0]["fr"], frs[-1]["fr"]
+    fspan = max(f1 - f0, 1)
+    X = lambda fr: ml + pw * ((fr - f0) / float(fspan))
+    flmax = max(max(r.get("flux", 0) for r in frs), 10) * 1.1
+    Yf = lambda v: mt + ph * (1.0 - min(v, flmax) / flmax)
+    Ya = lambda a: mt + ph * (1.0 - min(a, 255) / 255.0)
+
+    grid = ""
+    n_ticks = min(6, max(2, len(frs) - 1))
+    fps = float(fc.get("fps") or 25.0)
+    for k in range(n_ticks + 1):
+        fr_t = f0 + fspan * (k / float(n_ticks))
+        xx = X(fr_t)
+        grid += ("<line x1='%.1f' y1='%d' x2='%.1f' y2='%d' stroke='#1e2740'/>"
+                 "<text x='%.1f' y='%d' fill='#8a97ab' font-size='10' text-anchor='middle'>f%.0f (+%.1fs)</text>"
+                 % (xx, mt, xx, mt + ph, xx, H - 6, fr_t, (fr_t - f0) / fps))
+    pl_fl = " ".join("%.1f,%.1f" % (X(r["fr"]), Yf(r["flux"])) for r in frs)
+    area_fl = ("%.1f,%d " % (X(f0), mt + ph)) + pl_fl + (" %.1f,%d" % (X(f1), mt + ph))
+    pl_ad = " ".join("%.1f,%.1f" % (X(r["fr"]), Ya(r["peak_adu"])) for r in frs)
+    sat_y = Ya(254)
+    axes = (
+        "<line x1='%d' y1='%.1f' x2='%d' y2='%.1f' stroke='#ff8c64' stroke-dasharray='3 3' opacity='0.5'/>"
+        "<text x='%d' y='%d' fill='#7db4ff' font-size='10' text-anchor='end'>%d</text>"
+        "<text x='%d' y='%d' fill='#7db4ff' font-size='10' text-anchor='end'>0</text>"
+        "<text x='%d' y='%d' fill='#ff8c64' font-size='10'>255 ADU</text>"
+        "<text x='%d' y='%d' fill='#8a97ab' font-size='10'>0</text>"
+        % (ml, sat_y, ml + pw, sat_y, ml - 5, mt + 9, int(round(flmax)), ml - 5, mt + ph,
+           ml + pw + 4, mt + 9, ml + pw + 4, mt + ph)
+    )
+    return (
+        "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 %d %d' "
+        "style='width:100%%;max-width:%dpx;height:auto;margin:6px 0' role='img' aria-label='FR cutout flux'>"
+        "<rect x='%d' y='%d' width='%d' height='%d' fill='#0d1220' stroke='#1e2740'/>"
+        "%s%s"
+        "<polygon points='%s' fill='#7db4ff' opacity='0.14'/>"
+        "<polyline points='%s' fill='none' stroke='#ff8c64' stroke-width='1.4' stroke-dasharray='4 3'/>"
+        "<polyline points='%s' fill='none' stroke='#7db4ff' stroke-width='2' stroke-linejoin='round'/>"
+        "</svg>"
+        % (W, H, W, ml, mt, pw, ph, grid, axes, area_fl, pl_ad, pl_fl)
+    )
+
+
+def study_player_html(vid_sources, img_sources, f0_default, peak_fr, cam_fps, ff_start_epoch_ms=0):
+    """Interactive HTML5 video + frame-stepping + playback-rate + still-view switcher.
+    vid_sources: [(label, url, f0_clip), ...]
+    img_sources: [(label, url), ...]"""
+    if not vid_sources:
+        return "<p class=muted>No FF/FR media available on disk for this event.</p>"
+    vtabs = ""
+    for k, (lbl, url, f0_c) in enumerate(vid_sources):
+        act = " active" if k == 0 else ""
+        vtabs += (f"<button type=button class='sbtn vtab{act}' data-url='{html.escape(url, True)}' "
+                  f"data-f0='{f0_c}' onclick='switchVid(this)'>{html.escape(lbl)}</button>")
+    itabs = ""
+    for k, (lbl, url) in enumerate(img_sources):
+        act = " active" if k == 0 else ""
+        itabs += (f"<button type=button class='sbtn itab{act}' data-url='{html.escape(url, True)}' "
+                  f"onclick='switchImg(this)'>{html.escape(lbl)}</button>")
+
+    init_vurl, init_f0 = vid_sources[0][1], vid_sources[0][2]
+    init_iurl = img_sources[0][1] if img_sources else ""
+    img_block = ""
+    if img_sources:
+        img_block = (
+            f"<div style='margin-top:16px'>"
+            f"<div class=sbar><span class=muted>Still view:</span> {itabs} "
+            f"<a id=study-img-open href='{html.escape(init_iurl, True)}' target=_blank "
+            f"style='margin-left:auto;font-size:12px'>open full-res &nearr;</a></div>"
+            f"<a id=study-img-link href='{html.escape(init_iurl, True)}' target=_blank>"
+            f"<img id=study-img src='{html.escape(init_iurl, True)}' style='margin-top:6px'></a></div>"
+        )
+
+    return (
+        f"<div class=sbar><span class=muted>Clip view:</span> {vtabs}</div>"
+        f"<video id=study-vid controls autoplay muted loop playsinline "
+        f"style='width:100%;max-height:560px;background:#000;border-radius:8px;margin-top:6px' "
+        f"src='{html.escape(init_vurl, True)}'></video>"
+        f"<div class=sbar style='margin-top:6px'>"
+        f"<button type=button class=sbtn onclick='jumpStart()' title='Jump to clip start'>⏮ start</button>"
+        f"<button type=button class=sbtn onclick='stepFrame(-1)' title='Step back 1 frame (Left arrow)'>◀ −1 fr</button>"
+        f"<button type=button class=sbtn onclick='togglePlay()' title='Play / pause (Space)'>⏯ play/pause</button>"
+        f"<button type=button class=sbtn onclick='stepFrame(1)' title='Step forward 1 frame (Right arrow)'>+1 fr ▶</button>"
+        + (f"<button type=button class=sbtn onclick='jumpPeak()' title='Jump to peak brightness frame'>★ peak (f{peak_fr:.0f})</button>"
+           if peak_fr is not None else "")
+        + f"<span class=muted style='margin-left:8px'>Sky speed:</span>"
+        f"<button type=button class='sbtn rtab' onclick='setSkyRate(0.1,this)'>0.1×</button>"
+        f"<button type=button class='sbtn rtab' onclick='setSkyRate(0.25,this)'>0.25×</button>"
+        f"<button type=button class='sbtn rtab active' onclick='setSkyRate(0.5,this)'>0.5×</button>"
+        f"<button type=button class='sbtn rtab' onclick='setSkyRate(1.0,this)'>1×</button>"
+        f"<span id=fr-readout class=pill style='margin-left:auto;font-family:monospace'>frame —</span>"
+        f"</div>"
+        f"<p class=muted style='margin:4px 0 0;font-size:12px'>Keys: <code>&larr;</code> / <code>&rarr;</code> "
+        f"step single camera frames · <code>Space</code> play/pause · clip encoded at 12.5 fps (0.5× sky speed).</p>"
+        + img_block +
+        f"<script>\n"
+        f"(function(){{\n"
+        f"  const vid = document.getElementById('study-vid');\n"
+        f"  const ro = document.getElementById('fr-readout');\n"
+        f"  const CLIP_FPS = 12.5, CAM_FPS = {float(cam_fps or 25.0):.3f};\n"
+        f"  const FF_EPOCH = {int(ff_start_epoch_ms)};\n"
+        f"  let clipF0 = {float(init_f0):.3f}, skyRate = 0.5;\n"
+        f"  const PEAK_FR = {('null' if peak_fr is None else f'{float(peak_fr):.3f}')};\n"
+        f"  function upd(){{\n"
+        f"    const fr = clipF0 + vid.currentTime * CLIP_FPS;\n"
+        f"    let s = 'frame ' + fr.toFixed(1);\n"
+        f"    if (FF_EPOCH > 0) {{\n"
+        f"      const dt = new Date(FF_EPOCH + (fr / CAM_FPS) * 1000.0);\n"
+        f"      s += ' · ' + dt.toISOString().slice(11, 23) + ' UT';\n"
+        f"    }}\n"
+        f"    ro.textContent = s;\n"
+        f"  }}\n"
+        f"  vid.addEventListener('timeupdate', upd);\n"
+        f"  vid.addEventListener('seeked', upd);\n"
+        f"  vid.addEventListener('loadedmetadata', function(){{ vid.playbackRate = skyRate * (CAM_FPS / CLIP_FPS); upd(); }});\n"
+        f"  window.stepFrame = function(n){{ vid.pause(); vid.currentTime = Math.max(0, Math.min(vid.duration||999, vid.currentTime + n / CLIP_FPS + 0.001)); }};\n"
+        f"  window.togglePlay = function(){{ if (vid.paused) vid.play(); else vid.pause(); }};\n"
+        f"  window.jumpStart = function(){{ vid.pause(); vid.currentTime = 0; }};\n"
+        f"  window.jumpPeak = function(){{ if (PEAK_FR !== null) {{ vid.pause(); vid.currentTime = Math.max(0, (PEAK_FR - clipF0) / CLIP_FPS); }} }};\n"
+        f"  window.setSkyRate = function(r, btn){{\n"
+        f"    skyRate = r; vid.playbackRate = r * (CAM_FPS / CLIP_FPS);\n"
+        f"    document.querySelectorAll('.rtab').forEach(b => b.classList.remove('active'));\n"
+        f"    if (btn) btn.classList.add('active');\n"
+        f"  }};\n"
+        f"  window.switchVid = function(btn){{\n"
+        f"    const curFr = clipF0 + vid.currentTime * CLIP_FPS;\n"
+        f"    const wasPaused = vid.paused;\n"
+        f"    clipF0 = parseFloat(btn.getAttribute('data-f0') || '0');\n"
+        f"    vid.src = btn.getAttribute('data-url');\n"
+        f"    vid.addEventListener('loadedmetadata', function once(){{\n"
+        f"      vid.removeEventListener('loadedmetadata', once);\n"
+        f"      vid.currentTime = Math.max(0, (curFr - clipF0) / CLIP_FPS);\n"
+        f"      vid.playbackRate = skyRate * (CAM_FPS / CLIP_FPS);\n"
+        f"      if (!wasPaused) vid.play();\n"
+        f"    }});\n"
+        f"    document.querySelectorAll('.vtab').forEach(b => b.classList.remove('active'));\n"
+        f"    btn.classList.add('active');\n"
+        f"  }};\n"
+        f"  window.switchImg = function(btn){{\n"
+        f"    const u = btn.getAttribute('data-url');\n"
+        f"    const im = document.getElementById('study-img');\n"
+        f"    if (im) im.src = u;\n"
+        f"    const a1 = document.getElementById('study-img-open'), a2 = document.getElementById('study-img-link');\n"
+        f"    if (a1) a1.href = u; if (a2) a2.href = u;\n"
+        f"    document.querySelectorAll('.itab').forEach(b => b.classList.remove('active'));\n"
+        f"    btn.classList.add('active');\n"
+        f"  }};\n"
+        f"  document.addEventListener('keydown', function(e){{\n"
+        f"    if (e.target && ['INPUT','TEXTAREA','SELECT'].includes(e.target.tagName)) return;\n"
+        f"    if (e.key === 'ArrowLeft') {{ e.preventDefault(); window.stepFrame(-1); }}\n"
+        f"    else if (e.key === 'ArrowRight') {{ e.preventDefault(); window.stepFrame(1); }}\n"
+        f"    else if (e.key === ' ') {{ e.preventDefault(); window.togglePlay(); }}\n"
+        f"  }});\n"
+        f"}})();\n</script>"
+    )
+
+
 PAGE = """<!doctype html><html><head><meta charset=utf-8>
 <meta name=viewport content="width=device-width,initial-scale=1">
 {refresh}
@@ -674,18 +1110,29 @@ PAGE = """<!doctype html><html><head><meta charset=utf-8>
 :root{{color-scheme:dark}}
 body{{margin:0;background:#0a0d14;color:#c8d0dc;font:15px/1.5 system-ui,sans-serif}}
 a{{color:#7db4ff;text-decoration:none}} a:hover{{text-decoration:underline}}
-header{{padding:14px 20px;background:#111726;border-bottom:1px solid #1e2740;position:sticky;top:0;display:flex;gap:16px;align-items:baseline;flex-wrap:wrap}}
+header{{padding:14px 20px;background:#111726;border-bottom:1px solid #1e2740;position:sticky;top:0;z-index:10;display:flex;gap:16px;align-items:baseline;flex-wrap:wrap}}
 header h1{{font-size:17px;margin:0;color:#eaf0fa}}
-.pill{{font-size:12px;padding:2px 9px;border-radius:20px;background:#1a2740}}
+.pill{{font-size:12px;padding:2px 9px;border-radius:20px;background:#1a2740;display:inline-block}}
 .on{{background:#123a1e;color:#7ee29a}} .off{{background:#3a1414;color:#e28b8b}} .wait{{background:#3a2f14;color:#e2c98b}}
 main{{padding:20px;max-width:1100px;margin:0 auto}}
 .muted{{color:#7c879b;font-size:13px}}
 img{{max-width:100%;border-radius:8px;display:block;background:#000}}
-.grid{{display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:14px;margin-top:16px}}
+.grid{{display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:14px;margin-top:12px}}
 .card{{background:#111726;border:1px solid #1e2740;border-radius:10px;padding:10px}}
 .card h3{{font-size:13px;margin:8px 2px 2px;font-weight:600}}
 pre{{white-space:pre-wrap;background:#0d1220;border:1px solid #1e2740;border-radius:8px;padding:12px;font-size:12px;overflow:auto;max-height:340px}}
-.hero{{margin:8px 0 4px}} h2{{font-size:15px;margin:24px 0 6px;color:#eaf0fa}}
+.hero{{margin:8px 0 4px}} h2{{font-size:16px;margin:20px 0 6px;color:#eaf0fa}}
+.sbar{{display:flex;gap:6px;align-items:center;flex-wrap:wrap}}
+.sbtn{{padding:4px 10px;cursor:pointer;background:#151e30;color:#c8d0dc;border:1px solid #263552;border-radius:6px;font-size:12px}}
+.sbtn:hover{{border-color:#4c72a8;color:#fff}}
+.sbtn.active{{background:#213659;border-color:#7db4ff;color:#eaf0fa;font-weight:600}}
+.stbl{{border-collapse:collapse;width:100%;font-size:12px;font-variant-numeric:tabular-nums}}
+.stbl th,.stbl td{{padding:4px 7px;border-bottom:1px solid #1a2236;text-align:right}}
+.stbl th{{color:#8a97ab;font-weight:600;position:sticky;top:0;background:#0d1220}}
+.stbl td:first-child,.stbl th:first-child{{text-align:left}}
+details.sbox{{background:#0e1422;border:1px solid #1e2740;border-radius:10px;padding:10px 14px;margin:14px 0}}
+details.sbox>summary{{cursor:pointer;font-weight:600;color:#dce6f7;font-size:14px}}
+input.sinp{{background:#0d1220;color:#eaf0fa;border:1px solid #2f4a63;border-radius:6px;padding:5px 9px;font-size:13px;font-family:monospace}}
 </style></head><body>
 <header><h1>🌠 {station} meteor station</h1>
 <span class="pill {capcls}">capture: {cap}</span>{ukmonpill}
@@ -737,10 +1184,22 @@ class H(BaseHTTPRequestHandler):
         if u.path == "/night":
             return self.night(q.get("d", [""])[0])
         if u.path == "/det":
-            return self.det(q.get("d", [""])[0], q.get("i", ["-1"])[0])
-        if u.path in ("/detthumb", "/detvid", "/detfull"):
-            kind = {"/detthumb": "thumb", "/detvid": "video", "/detfull": "full"}[u.path]
-            return self.det_asset(q.get("d", [""])[0], q.get("i", ["-1"])[0], kind)
+            return self.det(q.get("d", [""])[0], q.get("i", [None])[0], q.get("u", [None])[0])
+        if u.path in ("/detthumb", "/detvid", "/detcropvid", "/detfull", "/detann", "/detresid"):
+            kind = {"/detthumb": "thumb", "/detvid": "video", "/detcropvid": "cropvideo",
+                    "/detfull": "full", "/detann": "ann", "/detresid": "resid"}[u.path]
+            return self.det_asset(q.get("d", [""])[0], q.get("i", [None])[0], q.get("u", [None])[0], kind)
+        if u.path == "/fr":
+            return self.fr(q.get("d", [""])[0], q.get("f", ["-1"])[0])
+        if u.path in ("/frthumb", "/frvid", "/frcropvid", "/frfull"):
+            kind = {"/frthumb": "thumb", "/frvid": "video", "/frcropvid": "cropvideo", "/frfull": "full"}[u.path]
+            return self.fr_asset(q.get("d", [""])[0], q.get("f", ["-1"])[0], kind)
+        if u.path == "/ff":
+            return self.ff(q.get("d", [""])[0], q.get("ff", [""])[0], q.get("t", [""])[0])
+        if u.path in ("/ffthumb", "/ffvid", "/fffull", "/ffann", "/ffresid"):
+            kind = {"/ffthumb": "thumb", "/ffvid": "video", "/fffull": "full",
+                    "/ffann": "ann", "/ffresid": "resid"}[u.path]
+            return self.ff_asset(q.get("d", [""])[0], q.get("ff", [""])[0], kind)
         if u.path == "/tdet":
             return self.tdet(q.get("ff", [""])[0])
         if u.path in ("/tdetthumb", "/tdetvid", "/tdetfull"):
@@ -1209,48 +1668,181 @@ class H(BaseHTTPRequestHandler):
                          f'<h3>{html.escape(n)}</h3></a></div>')
         self.page("RMS nights", hero + "<h2>All nights</h2><div class=grid>" + "".join(cards) + "</div>")
 
+    @staticmethod
+    def _det_card(name, d, v, is_unf=False):
+        qkey = f"u={d['i']}" if is_unf else f"i={d['i']}"
+        qs = f"d={urllib.parse.quote(name)}&{qkey}&v={v}"
+        img = (f"<img src='/detthumb?{qs}' loading=lazy style='height:130px;width:auto;margin:0 auto'>"
+               if d.get("has_ff") else "<div class=muted style='padding:36px 0;text-align:center'>FF aged out</div>")
+        pills = []
+        if d.get("shower"):
+            sh = d["shower"]
+            scol = "#7ee29a" if sh != "spo" else "#8a97ab"
+            pills.append(f"<span class=pill style='color:{scol};padding:1px 7px'>{html.escape(sh)}</span>")
+        if d.get("peak_mag") is not None:
+            pills.append(f"<span class=pill style='color:#ffd25a;padding:1px 7px'>{d['peak_mag']:+.1f}m</span>")
+        if d.get("fr_idx") is not None:
+            pills.append("<span class='pill on' style='padding:1px 7px'>FR raw</span>")
+        if is_unf:
+            pills.append("<span class='pill wait' style='padding:1px 7px'>pre-ML</span>")
+        meta2 = []
+        if d.get("ang_vel_deg_s") is not None:
+            meta2.append(f"{d['ang_vel_deg_s']:.1f}&deg;/s")
+        elif d.get("pxfm") is not None:
+            meta2.append(f"{d['pxfm']:.1f} px/f")
+        if d.get("compass_beg") and d.get("el_beg") is not None:
+            meta2.append(f"{html.escape(d['compass_beg'])} {d['el_beg']:.0f}&deg;")
+        if d.get("peak_snr") is not None:
+            meta2.append(f"SNR {d['peak_snr']:.0f}")
+        links = [f"<a href='/det?{qs}'>study &rarr;</a>"]
+        if d.get("has_ff"):
+            links.append(f"<a href='/detann?{qs}' target=_blank>sky map</a>")
+        if d.get("fr_idx") is not None:
+            links.append(f"<a href='/fr?d={urllib.parse.quote(name)}&f={d['fr_idx']}'>raw FR</a>")
+        return (
+            f"<div class=card><a href='/det?{qs}'>{img}</a>"
+            f"<div style='font-size:12px;margin-top:6px'>"
+            f"<b>{html.escape(d['time'])}</b> · {d['dur']:.2f}s · {d['nseg']} fr"
+            + (f"<div style='margin-top:3px'>{' '.join(pills)}</div>" if pills else "")
+            + (f"<div class=muted style='font-size:11px;margin-top:2px'>{' · '.join(meta2)}</div>" if meta2 else "")
+            + f"<div style='margin-top:4px'>{' · '.join(links)}</div></div></div>"
+        )
+
     def night(self, name):
         safe = real_within(ARCH_DET, name)
         if not safe or not os.path.isdir(safe):
             return self._send(404, "text/plain", b"no such night")
         parts = [f"<h2>{html.escape(name)}</h2>"]
-        # Per-detection cards: thumbnail links to a detail page with the
-        # FF-reconstruction clip; direct links to the clip and full-res frame.
         _, _, idx = det_index(name)
-        if idx and idx.get("detections"):
-            v = idx.get("src_mtime", 0)
-            cards = []
-            for d in idx["detections"]:
-                qs = f"d={urllib.parse.quote(name)}&i={d['i']}&v={v}"
-                img = (f"<img src='/detthumb?{qs}' loading=lazy style='height:130px;width:auto'>"
-                       if d.get("has_ff") else "<div class=muted>FF not archived</div>")
-                links = (f"<a href='/det?{qs}'>video</a> · <a href='/detfull?{qs}' target=_blank>full image</a>"
-                         if d.get("has_ff") else "")
-                cards.append(f"<div class=card><a href='/det?{qs}'>{img}</a>"
-                             f"<div style='font-size:12px;margin-top:4px'>{html.escape(d['time'])} · "
-                             f"{d['dur']:.2f}s · {d['nseg']} frames<br>{links}</div></div>")
-            parts.append(f"<h3>Detections ({len(idx['detections'])}) "
-                         f"<span class=muted style='font-size:12px'>— click a thumbnail for the video "
-                         f"snippet (½ speed, rebuilt from the FF block)</span></h3>"
-                         f"<div class=grid>{''.join(cards)}</div>")
-        _svg = star_chart_svg(star_history_calstars(safe))
+        dets = (idx or {}).get("detections", [])
+        unfs = (idx or {}).get("unfiltered", [])
+        frs = (idx or {}).get("fr_clips", [])
+        extra_ffs = (idx or {}).get("extra_ffs", [])
+        cap_cnt = (idx or {}).get("captured_ff_count", 0)
+        v = (idx or {}).get("src_mtime", 0)
+
+        # Summary strip + FF block UTC jump bar
+        pts_cal = star_history_calstars(safe)
+        peak_stars = max((n for _, n in pts_cal), default=0)
+        parts.append(
+            "<div style='display:flex;gap:12px;flex-wrap:wrap;margin:10px 0'>"
+            f"<div class=card><b>{len(dets)}</b><br><span class=muted>confirmed meteors (post-ML)</span></div>"
+            f"<div class=card><b>{len(unfs)}</b><br><span class=muted>rejected KHT candidates</span></div>"
+            f"<div class=card><b>{len(frs)}</b><br><span class=muted>raw FR video cutouts</span></div>"
+            f"<div class=card><b>{peak_stars}</b><br><span class=muted>peak clear-sky stars / FF</span></div>"
+            + (f"<div class=card><b>{cap_cnt:,}</b><br><span class=muted>FF blocks on disk "
+               f"({html.escape(idx.get('first_ff_utc') or '?')}–{html.escape(idx.get('last_ff_utc') or '?')} UT)</span></div>"
+               if cap_cnt else "")
+            + "</div>"
+        )
+
+        if cap_cnt or extra_ffs or dets:
+            chips = ""
+            if extra_ffs and not dets:
+                chips = " &nbsp;<span class=muted>Archived ref blocks:</span> " + " ".join(
+                    f"<a class=sbtn href='/ff?d={urllib.parse.quote(name)}&ff={urllib.parse.quote(e['ff'])}'>"
+                    f"{html.escape(e['time'])}</a>" for e in extra_ffs[:6]
+                )
+            rng_hint = (f"{idx.get('first_ff_utc')} – {idx.get('last_ff_utc')} UT"
+                        if cap_cnt and idx.get("first_ff_utc") else "HH:MM:SS UT")
+            parts.append(
+                f"<form method=get action='/ff' class='card sbar' style='margin:10px 0'>"
+                f"<input type=hidden name=d value='{html.escape(name, True)}'>"
+                f"<b>Inspect 10 s FF block:</b> "
+                f"<input class=sinp type=text name=t placeholder='{html.escape(rng_hint, True)}' size=15> "
+                f"<button type=submit class='sbtn active'>Open block &rarr;</button>"
+                f"<span class=muted style='font-size:12px'>Jump to any UTC time (e.g. a streak spotted in the stack or sister station)</span>"
+                f"{chips}</form>"
+            )
+
+        if dets:
+            cards = [self._det_card(name, d, v, is_unf=False) for d in dets]
+            parts.append(
+                f"<h3>Confirmed detections ({len(dets)}) "
+                f"<span class=muted style='font-size:12px'>— click any meteor for frame-by-frame playback, "
+                f"light curve, track linearity &amp; sky coordinates</span></h3>"
+                f"<div class=grid>{''.join(cards)}</div>"
+            )
+        else:
+            parts.append(
+                "<p class=muted style='margin:10px 0'><b>0 post-ML detections</b> in canonical "
+                "<code>FTPdetectinfo</code> — check the raw <code>FR_*.bin</code> cutouts and "
+                "pre-ML KHT candidates below, or jump to any 10 s FF block by UTC time above.</p>"
+            )
+
+        if frs:
+            fcards = []
+            for fc in frs:
+                fqs = f"d={urllib.parse.quote(name)}&f={fc['i']}&v={v}"
+                meta = [f"{fc['dur']:.2f}s", f"{fc['nframes']} raw fr"]
+                if fc.get("ang_vel_deg_s") is not None:
+                    meta.append(f"{fc['ang_vel_deg_s']:.1f}&deg;/s")
+                if fc.get("compass_beg") and fc.get("el_beg") is not None:
+                    meta.append(f"{html.escape(fc['compass_beg'])} {fc['el_beg']:.0f}&deg;")
+                badge = "<span class='pill on' style='padding:1px 7px'>raw sensor frames</span>"
+                if fc.get("det_idx") is not None:
+                    badge += (f" <a class=pill href='/det?d={urllib.parse.quote(name)}&i={fc['det_idx']}&v={v}'>"
+                              f"det #{fc['det_idx']+1}</a>")
+                elif fc.get("unf_idx") is not None:
+                    badge += (f" <a class=pill href='/det?d={urllib.parse.quote(name)}&u={fc['unf_idx']}&v={v}'>"
+                              f"pre-ML #{fc['unf_idx']+1}</a>")
+                fcards.append(
+                    f"<div class=card><a href='/fr?{fqs}'>"
+                    f"<img src='/frthumb?{fqs}' loading=lazy style='height:130px;width:auto;margin:0 auto'></a>"
+                    f"<div style='font-size:12px;margin-top:6px'>"
+                    f"<b>{html.escape(fc['time'])}</b> · {' · '.join(meta)}"
+                    f"<div style='margin-top:3px'>{badge}</div>"
+                    f"<div style='margin-top:4px'><a href='/fr?{fqs}'>study raw clip &rarr;</a> · "
+                    f"<a href='/frfull?{fqs}' target=_blank>composite image</a></div></div></div>"
+                )
+            parts.append(
+                f"<h3>Bright-event / fireball raw cutouts ({len(frs)}) "
+                f"<span class=muted style='font-size:12px'>— true 25 fps sensor patches from "
+                f"<code>FR_*.bin</code> (VideoExtraction)</span></h3>"
+                f"<div class=grid>{''.join(fcards)}</div>"
+            )
+
+        if unfs:
+            ucards = [self._det_card(name, u_d, v, is_unf=True) for u_d in unfs]
+            open_attr = " open" if not dets else ""
+            parts.append(
+                f"<details class=sbox{open_attr}>"
+                f"<summary>Pre-ML / rejected KHT candidates ({len(unfs)}) "
+                f"<span class=muted style='font-weight:400'>— filtered out by dawn ML or astrometry; "
+                f"sky coords projected via night platepar</span></summary>"
+                f"<div class=grid>{''.join(ucards)}</div></details>"
+            )
+
+        _svg = star_chart_svg(pts_cal)
         if _svg:
             parts.append("<h3>Star count through the night <span class=muted style='font-size:12px'>"
                          "· UTC, 3-min peak; dashed = plate-solve thresholds</span></h3>" + _svg)
         for label, suf in [("Detected meteors", "_DETECTED_thumbs.jpg"),
                            ("Detected meteors — night stack", "_meteors.jpg"),
+                           ("Radiant associations", "_radiants.png"),
                            ("Captured stack (whole night)", "_captured_stack.jpg"),
                            ("Captured thumbnails (sampled across the night, incl. dawn)", "_CAPTURED_thumbs.jpg"),
                            ("Field sums", "_fieldsums.png")]:
             f = find_suffix(safe, suf)
             if f:
                 parts.append(f"<h3>{label}</h3><img src='{fileurl(os.path.join(safe, f))}'>")
-        # timelapse
+
+        diag_imgs = []
+        for dlabel, dsuf in [("Observation summary", "_observation_summary.png"),
+                             ("Astrometry calibration report", "_calib_report_astrometry.jpg"),
+                             ("Photometry calibration report", "_calib_report_photometry.png"),
+                             ("FF intervals", "_ff_intervals.png")]:
+            df = find_suffix(safe, dsuf)
+            if df:
+                diag_imgs.append(f"<h4>{dlabel}</h4><img src='{fileurl(os.path.join(safe, df))}' loading=lazy>")
+        if diag_imgs:
+            parts.append("<details class=sbox><summary>Calibration &amp; diagnostic plots "
+                         f"({len(diag_imgs)})</summary>{''.join(diag_imgs)}</details>")
+
         tl = find_suffix(safe, "_timelapse.mp4")
         if tl:
             parts.append(f"<h3>Timelapse</h3><video controls style='max-width:100%'>"
                          f"<source src='{fileurl(os.path.join(safe, tl))}' type=video/mp4></video>")
-        # observation summary text
         rep = find_suffix(safe, "_observation_summary.txt") or find_suffix(safe, ".txt")
         if rep:
             try:
@@ -1261,34 +1853,294 @@ class H(BaseHTTPRequestHandler):
                 pass
         self.page(name, "".join(parts))
 
-    def det(self, name, i_s):
+    def det(self, name, i_s, u_s=None):
+        is_unf = u_s is not None and i_s is None
+        raw_s = u_s if is_unf else (i_s or "-1")
         try:
-            i = int(i_s)
+            i = int(raw_s)
         except ValueError:
             return self._send(404, "text/plain", b"bad detection index")
         _, _, idx = det_index(name)
-        dets = (idx or {}).get("detections", [])
+        group = "unfiltered" if is_unf else "detections"
+        dets = (idx or {}).get(group, [])
         if not (0 <= i < len(dets)):
             return self._send(404, "text/plain", b"no such detection")
         d = dets[i]
         v = idx.get("src_mtime", 0)
-        qs = f"d={urllib.parse.quote(name)}&i={i}&v={v}"
-        nav = " · ".join(
-            [f"<a href='/det?d={urllib.parse.quote(name)}&i={i-1}&v={v}'>&larr; prev</a>"] * (i > 0)
-            + [f"<a href='/det?d={urllib.parse.quote(name)}&i={i+1}&v={v}'>next &rarr;</a>"] * (i < len(dets) - 1))
-        media = ("<p class=muted>FF file not archived for this detection — no media available.</p>"
-                 if not d.get("has_ff") else
-                 f"<video controls autoplay muted loop playsinline style='max-width:100%;background:#000'>"
-                 f"<source src='/detvid?{qs}' type=video/mp4></video>"
-                 f"<p class=muted>Clip rebuilt from the FF block (avepixel + maxpixel transients), "
-                 f"played at ½ speed; first load takes a few seconds while it renders. "
-                 f"<a href='/detfull?{qs}' target=_blank>full-resolution maxpixel frame</a></p>")
-        body = (f"<h2><a href='/night?d={urllib.parse.quote(name)}'>{html.escape(name)}</a> — "
-                f"detection {i+1} of {len(dets)}</h2>"
-                f"<p>{html.escape(d['date'])} {html.escape(d['time'])} · {d['dur']:.2f} s · "
-                f"{d['nseg']} frames · <code>{html.escape(d['ff'])}</code></p>"
-                f"{media}<p>{nav}</p>")
-        self.page(f"{name} · det {i+1}", body)
+        qparam = "u" if is_unf else "i"
+        qs = f"d={urllib.parse.quote(name)}&{qparam}={i}&v={v}"
+        nav_links = []
+        if i > 0:
+            nav_links.append(f"<a class=sbtn href='/det?d={urllib.parse.quote(name)}&{qparam}={i-1}&v={v}'>&larr; prev</a>")
+        nav_links.append(f"<a class=sbtn href='/night?d={urllib.parse.quote(name)}'>all night events</a>")
+        if d.get("has_ff"):
+            nav_links.append(f"<a class=sbtn href='/ff?d={urllib.parse.quote(name)}&ff={urllib.parse.quote(d['ff'])}'>full 10s FF block</a>")
+        if d.get("fr_idx") is not None:
+            nav_links.append(f"<a class='sbtn active' href='/fr?d={urllib.parse.quote(name)}&f={d['fr_idx']}&v={v}'>raw FR clip &rarr;</a>")
+        if i < len(dets) - 1:
+            nav_links.append(f"<a class=sbtn href='/det?d={urllib.parse.quote(name)}&{qparam}={i+1}&v={v}'>next &rarr;</a>")
+
+        status_pill = ("<span class='pill wait'>pre-ML / rejected KHT candidate</span>"
+                       if is_unf else "<span class='pill on'>confirmed meteor (post-ML)</span>")
+        if d.get("shower"):
+            sh = d["shower"]
+            status_pill += f" <span class=pill style='color:#7ee29a'>shower: {html.escape(sh)}</span>"
+        if d.get("max_sat_px", 0) > 0:
+            status_pill += f" <span class='pill off'>saturated ({d['max_sat_px']} px)</span>"
+
+        # Summary metric cards
+        mcards = [
+            f"<div class=card><b>{html.escape(d['time'])}</b><br>"
+            f"<span class=muted>{html.escape(d['date'])} · {d['dur']:.2f}s ({d['nseg']} seg, f{d['fmin']:.1f}–{d['fmax']:.1f})</span></div>",
+        ]
+        if d.get("peak_mag") is not None:
+            abs_s = f" · abs {d['abs_mag']:+.1f}m" if d.get("abs_mag") is not None else ""
+            mcards.append(f"<div class=card><b style='color:#ffd25a'>{d['peak_mag']:+.2f} mag</b><br>"
+                          f"<span class=muted>peak brightness · SNR {d.get('peak_snr') or 0:.1f}{abs_s}</span></div>")
+        else:
+            mcards.append(f"<div class=card><b>SNR {d.get('peak_snr') or 0:.1f}</b><br>"
+                          f"<span class=muted>peak inten {d.get('peak_inten', 0):,} ADU</span></div>")
+
+        if d.get("ang_vel_deg_s") is not None:
+            av = d["ang_vel_deg_s"]
+            hint = ("meteor speed range" if 3.0 <= av <= 75.0 else
+                    "slow (<3°/s: aircraft/sat/cloud?)" if av < 3.0 else "very fast")
+            mcards.append(f"<div class=card><b>{av:.1f} &deg;/s</b> · {d.get('ang_len_deg') or 0:.1f}&deg;<br>"
+                          f"<span class=muted>{d.get('pxfm') or 0:.1f} px/fr · {hint}</span></div>")
+        else:
+            mcards.append(f"<div class=card><b>{d.get('pxfm') or 0:.1f} px/fr</b> · {d.get('px_len', 0):.0f} px<br>"
+                          f"<span class=muted>linearity RMS {d.get('lin_rms_px', 0):.2f} px</span></div>")
+
+        if d.get("has_cal") and d.get("az_beg") is not None:
+            cal_tag = "" if d.get("cal_source") == "ftpdetectinfo" else " (approx platepar)"
+            mcards.append(
+                f"<div class=card><b>{html.escape(d.get('compass_beg') or '')} {d['el_beg']:.1f}&deg; &rarr; "
+                f"{html.escape(d.get('compass_end') or '')} {d['el_end']:.1f}&deg;</b><br>"
+                f"<span class=muted>Az {d['az_beg']:.1f}&deg;&rarr;{d['az_end']:.1f}&deg; · "
+                f"RA/Dec {d['ra_beg']:.1f}&deg;,{d['dec_beg']:+.1f}&deg;&rarr;{d['ra_end']:.1f}&deg;,{d['dec_end']:+.1f}&deg;{cal_tag}</span></div>"
+            )
+        mcards.append(
+            f"<div class=card><b>{d.get('lin_rms_px', 0):.2f} px</b><br>"
+            f"<span class=muted>cross-track RMS ({'tight line' if d.get('lin_rms_px', 0) < 1.5 else 'scattered'})</span></div>"
+        )
+
+        # Video + image player
+        ff_dt = _ff_datetime(d["ff"])
+        epoch_ms = int(ff_dt.replace(tzinfo=datetime.timezone.utc).timestamp() * 1000) if ff_dt else 0
+        f0_clip = max(0, int(d["fmin"]) - 15)
+        vid_sources, img_sources = [], []
+        if d.get("has_ff"):
+            if d.get("px_len", 0) < 280:
+                vid_sources = [("Zoomed track crop", f"/detcropvid?{qs}", f0_clip),
+                               ("Full frame (FF rebuild)", f"/detvid?{qs}", f0_clip)]
+            else:
+                vid_sources = [("Full frame (FF rebuild)", f"/detvid?{qs}", f0_clip),
+                               ("Zoomed track crop", f"/detcropvid?{qs}", f0_clip)]
+            img_sources = [
+                ("Annotated sky + reticle", f"/detann?{qs}"),
+                ("Clean maxpixel", f"/detfull?{qs}"),
+                ("Transient residual (max − ave)", f"/detresid?{qs}"),
+            ]
+        if d.get("fr_idx") is not None:
+            fr_list = idx.get("fr_clips", [])
+            if 0 <= d["fr_idx"] < len(fr_list):
+                fc = fr_list[d["fr_idx"]]
+                fqs = f"d={urllib.parse.quote(name)}&f={fc['i']}&v={v}"
+                vid_sources.insert(0, ("Raw sensor cutout (FR.bin)", f"/frcropvid?{fqs}", fc["fmin"]))
+                vid_sources.append(("Raw sensor full context", f"/frvid?{fqs}", fc["fmin"]))
+
+        player = study_player_html(vid_sources, img_sources, f0_clip, d.get("peak_frame"), d.get("fps", 25.0), epoch_ms)
+
+        lc_svg = det_lightcurve_svg(d)
+        kin_svg = det_kinematics_svg(d)
+        plots = ""
+        if lc_svg:
+            ylbl = "Apparent Magnitude (blue, brighter up)" if d.get("has_mag") else "Integrated Intensity ADU (blue)"
+            plots += (f"<h3>Photometric light curve <span class=muted style='font-size:12px'>· {ylbl} "
+                      f"&amp; SNR (dashed green); gold dot = peak frame</span></h3>{lc_svg}")
+        if kin_svg:
+            plots += (f"<h3>Centroid linearity &amp; frame speed <span class=muted style='font-size:12px'>"
+                      f"· cross-track residual px from best-fit line (green, RMS {d.get('lin_rms_px', 0):.2f} px) "
+                      f"&amp; step speed px/frame (dashed amber)</span></h3>{kin_svg}")
+
+        # Per-segment measurement table + CSV
+        segs = d.get("segments") or []
+        seg_html = ""
+        if segs:
+            rows = []
+            csv_lines = ["frame,utc,x_px,y_px,az_deg,el_deg,ra_deg,dec_deg,inten_adu,mag,bck_adu,snr,sat_px,cross_px"]
+            for s in segs:
+                az_s = f"{s['az']:.2f}" if s.get("az") is not None else "—"
+                el_s = f"{s['el']:.2f}" if s.get("el") is not None else "—"
+                ra_s = f"{s['ra']:.3f}" if s.get("ra") is not None else "—"
+                dc_s = f"{s['dec']:+.3f}" if s.get("dec") is not None else "—"
+                mg_s = f"{s['mag']:+.2f}" if s.get("mag") is not None else "—"
+                rows.append(
+                    f"<tr><td>{s['fr']:.3f}</td><td>{html.escape(s['ut'])}</td>"
+                    f"<td>{s['x']:.2f}</td><td>{s['y']:.2f}</td>"
+                    f"<td>{az_s}</td><td>{el_s}</td><td>{ra_s}</td><td>{dc_s}</td>"
+                    f"<td>{s['inten']:,}</td><td>{mg_s}</td><td>{s['bck']}</td>"
+                    f"<td>{s['snr']:.2f}</td><td>{s['sat']}</td><td>{s['cross_px']:+.2f}</td></tr>"
+                )
+                csv_lines.append(
+                    f"{s['fr']:.4f},{s['ut']},{s['x']:.2f},{s['y']:.2f},"
+                    f"{s.get('az') or ''},{s.get('el') or ''},{s.get('ra') or ''},{s.get('dec') or ''},"
+                    f"{s['inten']},{s.get('mag') if s.get('mag') is not None else ''},"
+                    f"{s['bck']},{s['snr']:.2f},{s['sat']},{s['cross_px']:.3f}"
+                )
+            seg_html = (
+                f"<details class=sbox><summary>Per-frame astrometry &amp; photometry ({len(segs)} segments)</summary>"
+                f"<div style='max-height:360px;overflow:auto;margin-top:8px'>"
+                f"<table class=stbl><tr><th>Frame#</th><th>UTC</th><th>X</th><th>Y</th>"
+                f"<th>Az&deg;</th><th>El&deg;</th><th>RA&deg;</th><th>Dec&deg;</th>"
+                f"<th>Inten</th><th>Mag</th><th>Bck</th><th>SNR</th><th>Sat</th><th>Cross px</th></tr>"
+                f"{''.join(rows)}</table></div>"
+                f"<details style='margin-top:8px'><summary class=muted style='cursor:pointer'>CSV export</summary>"
+                f"<pre>{html.escape(chr(10).join(csv_lines))}</pre></details></details>"
+            )
+
+        kind_lbl = "pre-ML candidate" if is_unf else "detection"
+        body = (
+            f"<div class=sbar style='justify-content:space-between'>"
+            f"<h2 style='margin:6px 0'><a href='/night?d={urllib.parse.quote(name)}'>{html.escape(name)}</a> "
+            f"— {kind_lbl} {i+1} of {len(dets)}</h2>"
+            f"<div class=sbar>{' '.join(nav_links)}</div></div>"
+            f"<div style='margin:4px 0 10px'>{status_pill} &nbsp;<code class=muted>{html.escape(d['ff'])}</code>"
+            + (f" <span class=muted>({html.escape(d.get('ff_source') or '')})</span>" if d.get("ff_source") else "")
+            + f"</div>"
+            f"<div style='display:flex;gap:12px;flex-wrap:wrap;margin:10px 0'>{''.join(mcards)}</div>"
+            f"{player}{plots}{seg_html}"
+        )
+        self.page(f"{name} · {kind_lbl} {i+1}", body)
+
+    def fr(self, name, f_s):
+        try:
+            f_idx = int(f_s)
+        except ValueError:
+            return self._send(404, "text/plain", b"bad FR index")
+        _, _, idx = det_index(name)
+        clips = (idx or {}).get("fr_clips", [])
+        if not (0 <= f_idx < len(clips)):
+            return self._send(404, "text/plain", b"no such FR clip")
+        fc = clips[f_idx]
+        v = idx.get("src_mtime", 0)
+        qs = f"d={urllib.parse.quote(name)}&f={f_idx}&v={v}"
+        nav = []
+        if f_idx > 0:
+            nav.append(f"<a class=sbtn href='/fr?d={urllib.parse.quote(name)}&f={f_idx-1}&v={v}'>&larr; prev FR</a>")
+        nav.append(f"<a class=sbtn href='/night?d={urllib.parse.quote(name)}'>all night events</a>")
+        if fc.get("has_ff"):
+            nav.append(f"<a class=sbtn href='/ff?d={urllib.parse.quote(name)}&ff={urllib.parse.quote(fc['ff'])}'>parent 10s FF block</a>")
+        if fc.get("det_idx") is not None:
+            nav.append(f"<a class='sbtn active' href='/det?d={urllib.parse.quote(name)}&i={fc['det_idx']}&v={v}'>confirmed det #{fc['det_idx']+1}</a>")
+        elif fc.get("unf_idx") is not None:
+            nav.append(f"<a class='sbtn active' href='/det?d={urllib.parse.quote(name)}&u={fc['unf_idx']}&v={v}'>pre-ML #{fc['unf_idx']+1}</a>")
+        if f_idx < len(clips) - 1:
+            nav.append(f"<a class=sbtn href='/fr?d={urllib.parse.quote(name)}&f={f_idx+1}&v={v}'>next FR &rarr;</a>")
+
+        ff_dt = _ff_datetime(fc["ff"])
+        epoch_ms = int(ff_dt.replace(tzinfo=datetime.timezone.utc).timestamp() * 1000) if ff_dt else 0
+        vid_sources = [
+            ("Zoomed raw sensor cutout", f"/frcropvid?{qs}", fc["fmin"]),
+            ("Full-frame context", f"/frvid?{qs}", fc["fmin"]),
+        ]
+        img_sources = [("Composite max (FR + FF)", f"/frfull?{qs}")]
+        if fc.get("has_ff"):
+            bqs = f"d={urllib.parse.quote(name)}&ff={urllib.parse.quote(fc['ff'])}"
+            img_sources.append(("Annotated sky (parent FF)", f"/ffann?{bqs}"))
+            img_sources.append(("Transient residual (parent FF)", f"/ffresid?{bqs}"))
+
+        mcards = [
+            f"<div class=card><b>{html.escape(fc['time'])}</b><br>"
+            f"<span class=muted>{html.escape(fc['date'])} · {fc['dur']:.2f}s ({fc['nframes']} raw frames, f{fc['fmin']}–{fc['fmax']})</span></div>",
+            f"<div class=card><b>{fc['cutout_px']}&times;{fc['cutout_px']} px</b><br>"
+            f"<span class=muted>raw cutout · peak {fc['peak_adu']} ADU · sat {fc['max_sat_px']} px</span></div>",
+        ]
+        if fc.get("ang_vel_deg_s") is not None and fc.get("az_beg") is not None:
+            mcards.append(
+                f"<div class=card><b>{fc['ang_vel_deg_s']:.1f} &deg;/s</b> · {fc.get('ang_len_deg') or 0:.1f}&deg;<br>"
+                f"<span class=muted>{html.escape(fc.get('compass_beg') or '')} {fc['el_beg']:.0f}&deg; &rarr; "
+                f"{html.escape(fc.get('compass_end') or '')} {fc['el_end']:.0f}&deg;</span></div>"
+            )
+
+        player = study_player_html(vid_sources, img_sources, fc["fmin"], fc.get("peak_frame"), fc.get("fps", 25.0), epoch_ms)
+        svg = fr_lightcurve_svg(fc)
+        plot = (f"<h3>Raw cutout flux &amp; peak pixel ADU <span class=muted style='font-size:12px'>"
+                f"· background-subtracted cutout sum (blue) &amp; peak pixel ADU (dashed orange, 255 = saturation)</span></h3>{svg}"
+                if svg else "")
+        body = (
+            f"<div class=sbar style='justify-content:space-between'>"
+            f"<h2 style='margin:6px 0'><a href='/night?d={urllib.parse.quote(name)}'>{html.escape(name)}</a> "
+            f"— raw FR clip {f_idx+1} of {len(clips)}</h2>"
+            f"<div class=sbar>{' '.join(nav)}</div></div>"
+            f"<p class=muted style='margin:2px 0 10px'><span class='pill on'>raw 25 fps cutout</span> "
+            f"<code>{html.escape(fc['fr'])}</code></p>"
+            f"<div style='display:flex;gap:12px;flex-wrap:wrap;margin:10px 0'>{''.join(mcards)}</div>"
+            f"{player}{plot}"
+        )
+        self.page(f"{name} · FR {f_idx+1}", body)
+
+    def ff(self, name, ff_param="", time_param=""):
+        safe = real_within(ARCH_DET, name)
+        if not safe or not os.path.isdir(safe):
+            return self._send(404, "text/plain", b"no such night")
+        chosen, prev_ff, next_ff, total_ffs, delta_s = resolve_night_ff(name, ff_param, time_param)
+        if not chosen:
+            return self._send(404, "text/plain", b"no matching FF block on disk for that night/time")
+        bqs = f"d={urllib.parse.quote(name)}&ff={urllib.parse.quote(chosen)}"
+        ff_dt = _ff_datetime(chosen)
+        tmstr = ff_dt.strftime("%Y-%m-%d %H:%M:%S.%f")[:-3] + " UT" if ff_dt else chosen
+        epoch_ms = int(ff_dt.replace(tzinfo=datetime.timezone.utc).timestamp() * 1000) if ff_dt else 0
+
+        nav = []
+        if prev_ff:
+            nav.append(f"<a class=sbtn href='/ff?d={urllib.parse.quote(name)}&ff={urllib.parse.quote(prev_ff)}'>&larr; −10s block</a>")
+        nav.append(f"<a class=sbtn href='/night?d={urllib.parse.quote(name)}'>back to night</a>")
+        if next_ff:
+            nav.append(f"<a class=sbtn href='/ff?d={urllib.parse.quote(name)}&ff={urllib.parse.quote(next_ff)}'>+10s block &rarr;</a>")
+
+        # Cross-link any detections/candidates/FR clips inside this FF block
+        _, _, idx = det_index(name)
+        rel = []
+        if idx:
+            v = idx.get("src_mtime", 0)
+            for d in idx.get("detections", []):
+                if d["ff"] == chosen:
+                    rel.append(f"<a class='pill on' href='/det?d={urllib.parse.quote(name)}&i={d['i']}&v={v}'>confirmed det #{d['i']+1} ({html.escape(d['time'])})</a>")
+            for u_d in idx.get("unfiltered", []):
+                if u_d["ff"] == chosen:
+                    rel.append(f"<a class='pill wait' href='/det?d={urllib.parse.quote(name)}&u={u_d['i']}&v={v}'>pre-ML #{u_d['i']+1} ({html.escape(u_d['time'])})</a>")
+            for fc in idx.get("fr_clips", []):
+                if fc["ff"] == chosen:
+                    rel.append(f"<a class='pill on' href='/fr?d={urllib.parse.quote(name)}&f={fc['i']}&v={v}'>raw FR clip #{fc['i']+1}</a>")
+
+        vid_sources = [("Full 10s FF block (256 frames)", f"/ffvid?{bqs}", 0)]
+        img_sources = [
+            ("Annotated sky (stars + compass)", f"/ffann?{bqs}"),
+            ("Transient residual (max − ave)", f"/ffresid?{bqs}"),
+            ("Clean maxpixel", f"/fffull?{bqs}"),
+        ]
+        init_fr = round(max(0.0, min(255.0, delta_s * 25.0)), 1) if (time_param and delta_s > 0) else None
+        player = study_player_html(vid_sources, img_sources, 0, init_fr, 25.0, epoch_ms)
+
+        jump_bar = (
+            f"<form method=get action='/ff' class=sbar style='margin:8px 0'>"
+            f"<input type=hidden name=d value='{html.escape(name, True)}'>"
+            f"<span class=muted>Jump UTC:</span> "
+            f"<input class=sinp type=text name=t value='{html.escape(time_param or (ff_dt.strftime('%H:%M:%S') if ff_dt else ''), True)}' size=12> "
+            f"<button type=submit class=sbtn>Go</button>"
+            f"<span class=muted style='font-size:12px'>({total_ffs:,} blocks available)</span></form>"
+        )
+        body = (
+            f"<div class=sbar style='justify-content:space-between'>"
+            f"<h2 style='margin:6px 0'><a href='/night?d={urllib.parse.quote(name)}'>{html.escape(name)}</a> "
+            f"— FF block {html.escape(tmstr)}</h2>"
+            f"<div class=sbar>{' '.join(nav)}</div></div>"
+            f"<p class=muted style='margin:2px 0 6px'><code>{html.escape(chosen)}</code>"
+            + (" &nbsp;" + " ".join(rel) if rel else "") + "</p>"
+            + jump_bar + player
+        )
+        self.page(f"{name} · {chosen}", body)
 
     def tdet(self, ff):
         """Detail page for a live /tonight flagged block: video snippet + full frame."""
@@ -1297,22 +2149,45 @@ class H(BaseHTTPRequestHandler):
         qs = "ff=" + urllib.parse.quote(ff)
         tm = re.search(r"_\d{8}_(\d{2})(\d{2})(\d{2})_", ff)
         tmstr = "{}:{}:{} UTC".format(*tm.groups()) if tm else "—"
+        ff_dt = _ff_datetime(ff)
+        epoch_ms = int(ff_dt.replace(tzinfo=datetime.timezone.utc).timestamp() * 1000) if ff_dt else 0
+        player = study_player_html(
+            [("Full 10 s live FF block", f"/tdetvid?{qs}", 0)],
+            [("Maxpixel full frame", f"/tdetfull?{qs}"), ("Transient residual thumb", f"/tdetthumb?{qs}")],
+            0, None, 25.0, epoch_ms,
+        )
         body = (f"<h2><a href='/tonight'>Tonight</a> — detection block {tmstr}</h2>"
                 f"<p class=muted><code>{html.escape(ff)}</code> · live candidate "
-                f"(ML filter + astrometry refine at dawn)</p>"
-                f"<video controls autoplay muted loop playsinline style='max-width:100%;background:#000'>"
-                f"<source src='/tdetvid?{qs}' type=video/mp4></video>"
-                f"<p class=muted>Full 10 s block rebuilt from the FF (avepixel + maxpixel transients), "
-                f"½ speed; first load takes a few seconds to render. "
-                f"<a href='/tdetfull?{qs}' target=_blank>full-resolution maxpixel frame</a></p>")
+                f"(ML filter + astrometry refine at dawn)</p>{player}")
         self.page("Tonight · " + tmstr, body)
 
-    def det_asset(self, name, i_s, kind):
+    def det_asset(self, name, i_s, u_s, kind):
+        is_unf = u_s is not None and i_s is None
+        raw_s = u_s if is_unf else (i_s or "-1")
         try:
-            i = int(i_s)
+            i = int(raw_s)
         except ValueError:
             return self._send(404, "text/plain", b"bad detection index")
-        p = det_media(name, i, kind)
+        group = "unfiltered" if is_unf else "detections"
+        p = det_media(name, i, kind, group=group)
+        if not p:
+            return self._send(404, "text/plain", b"media unavailable")
+        ctype = "video/mp4" if kind in ("video", "cropvideo") else "image/jpeg"
+        self.serve_binary(p, ctype)
+
+    def fr_asset(self, name, f_s, kind):
+        try:
+            f_idx = int(f_s)
+        except ValueError:
+            return self._send(404, "text/plain", b"bad FR index")
+        p = fr_media(name, f_idx, kind)
+        if not p:
+            return self._send(404, "text/plain", b"media unavailable")
+        ctype = "video/mp4" if kind in ("video", "cropvideo") else "image/jpeg"
+        self.serve_binary(p, ctype)
+
+    def ff_asset(self, name, ff_name, kind):
+        p = night_block_media(name, ff_name, kind)
         if not p:
             return self._send(404, "text/plain", b"media unavailable")
         ctype = "video/mp4" if kind == "video" else "image/jpeg"
