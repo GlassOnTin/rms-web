@@ -16,12 +16,19 @@ site. This fills that gap: point a browser at the Pi and browse last night's sta
 timelapses and reports, watch tonight's capture build in real time, jump to the live camera, and
 see your place in the network.
 
-No framework, three pieces:
+No framework, four pieces:
 
-- **`rms_web.py`** — a single-file HTTP server (Python **standard library only**). Serves the
-  contents of `RMS_data/` as a browsable dashboard: nightly captured stacks, detection
-  thumbnails, timelapses and observation reports, a live-view link (MediaMTX WebRTC), and the
-  neighbours page. Read-only, GET-only, path-sanitised (no directory traversal).
+- **`rms_web.py`** - a single-file HTTP server (Python **standard library only**). Serves the
+  contents of `RMS_data/` as a browsable dashboard: nightly captured stacks, interactive meteor
+  study pages (`/det`, `/fr`, `/ff`) with frame-by-frame playback, SVG light curves and track
+  linearity plots, pre-ML candidate inspection, raw `FR_*.bin` fireball cutouts, arbitrary 10 s
+  FF block lookup by UTC time, timelapses, a live-view link (MediaMTX WebRTC), and the neighbours
+  page. Path-sanitised (no directory traversal).
+- **`detection_media.py`** - lazy media and metadata builder invoked by `rms_web.py` inside the
+  RMS virtualenv (`nice -n 15`). Reads `FTPdetectinfo` (confirmed and `_unfiltered.txt`),
+  `*_radiants.txt`, `FR_*.bin` cutouts, and `FF_*.fits` blocks (with fallback to `CapturedFiles/`
+  while still on disk), writing thumbnails, sky-annotated frames, `maxpixel - avepixel` residuals,
+  and 12.5 fps MP4 clips into `detcache/`.
 - **`make_tonight_preview.py`** — a small daemon behind the **/tonight** page: incrementally
   stacks tonight's FF files as they are written and renders the latest-sky and cumulative-stack
   previews. Its overlay modules annotate each render through the live platepar:
@@ -84,6 +91,10 @@ Then open `http://<host>:8080/`.
 | `STATION_LAT` / `STATION_LON` | from RMS `.config` | map — your camera position (no default) |
 | `STATION_NAME` | station code from RMS `.config` | map + header label |
 | `RMS_CONFIG` | `~/source/RMS/.config` | fallback source for position/station code |
+| `RMS_SOURCE` | `~/source/RMS` | media/overlays - path to local RMS clone |
+| `RMS_WEB_VENV_PY` | `~/vRMS/bin/python3` | server - RMS virtualenv Python for `detection_media.py` |
+| `RMS_CAPTURE_SERVICE` | `rms-capture` | server - systemd unit reported in header pill |
+| `RMS_WEB_DETCACHE` | `<repo>/detcache` | server - cache directory for per-event JPEGs/MP4s |
 | `STATION_FOOTPRINT_KM` | `100` | map — approx ground radius covered at 100 km altitude |
 
 ## Deploy (systemd)
