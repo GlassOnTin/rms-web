@@ -69,15 +69,39 @@ yours (each station links to its GMN weblog):
 - Internet access (for the neighbours map only: OSM tiles + GMN KML). Tiles are cached in
   `osm_cache/`.
 
-## Run
+## Quick install (systemd)
+
+On a standard GMN Raspberry Pi or Linux station (`~/source/RMS`, `~/vRMS`), clone and run
+`install.sh`:
 
 ```bash
-# dashboard (defaults: serves /mnt/nvme/RMS_data on :8080)
-RMS_DATA=/mnt/nvme/RMS_data RMS_WEB_PORT=8080 python3 rms_web.py
+cd ~/source
+git clone https://github.com/GlassOnTin/rms-web.git
+cd rms-web
+./install.sh
+```
 
-# generate the neighbours map — position comes from your RMS .config
-# (or set STATION_LAT / STATION_LON / STATION_NAME explicitly)
-RMS_CONFIG=~/source/RMS/.config python3 make_neighbours_map.py --refresh
+`install.sh` reads `stationID` and `data_dir` from `~/source/RMS/.config`, installs `matplotlib`
+and `pillow` into `~/vRMS` if missing, writes `/etc/rms-web/rms-web.env`, enables the dashboard
+(`rms-web.service`), live preview daemon (`rms-tonight-preview.service`), and background refresh
+timers (`neighbours` + `scorecard`), and builds the initial neighbours map.
+
+For a second camera on the same host:
+
+```bash
+./install.sh --instance cam2 --rms-source ~/source/RMS-cam2 --venv ~/vRMS-cam2 --port 8081
+```
+
+Preview without root via `./install.sh --dry-run`; remove units via `./install.sh --uninstall`.
+
+## Run manually
+
+```bash
+# dashboard (auto-discovers data_dir and stationID from ~/source/RMS/.config, listens on :8080)
+python3 rms_web.py
+
+# generate the neighbours map
+~/vRMS/bin/python make_neighbours_map.py --refresh
 ```
 
 Then open `http://<host>:8080/`.
@@ -86,31 +110,17 @@ Then open `http://<host>:8080/`.
 
 | Variable | Default | Used by |
 |---|---|---|
-| `RMS_DATA` | `/mnt/nvme/RMS_data` | server — path to RMS data dir |
-| `RMS_WEB_PORT` | `8080` | server — listen port |
-| `STATION_LAT` / `STATION_LON` | from RMS `.config` | map — your camera position (no default) |
-| `STATION_NAME` | station code from RMS `.config` | map + header label |
-| `RMS_CONFIG` | `~/source/RMS/.config` | fallback source for position/station code |
+| `RMS_CONFIG` | `~/source/RMS/.config` | config file read for `data_dir`, `stationID`, `latitude`, `longitude`, `device` |
+| `RMS_DATA` | `data_dir` from `.config` (`~/RMS_data`) | server + preview - path to RMS data dir |
+| `RMS_WEB_PORT` | `8080` | server - listen port |
+| `STATION_LAT` / `STATION_LON` | from RMS `.config` | map + Europe cloud chart - camera position |
+| `STATION_NAME` | `stationID` from RMS `.config` | map + header label |
 | `RMS_SOURCE` | `~/source/RMS` | media/overlays - path to local RMS clone |
 | `RMS_WEB_VENV_PY` | `~/vRMS/bin/python3` | server - RMS virtualenv Python for `detection_media.py` |
-| `RMS_CAPTURE_SERVICE` | `rms-capture` | server - systemd unit reported in header pill |
+| `RMS_CAPTURE_SERVICE` | `rms-capture` | server - systemd unit checked alongside `RMS.StartCapture` + FF file age |
 | `RMS_WEB_DETCACHE` | `<repo>/detcache` | server - cache directory for per-event JPEGs/MP4s |
-| `STATION_FOOTPRINT_KM` | `100` | map — approx ground radius covered at 100 km altitude |
-
-## Deploy (systemd)
-
-Example units in [`deploy/`](deploy/) (adjust the `User=` and the `/home/ian/...` paths for your
-system):
-
-- `rms-web.service` — runs the dashboard, `Restart=always`.
-- `rms-neighbours-refresh.service` + `.timer` — regenerates the neighbours map weekly (so
-  newly-joined stations appear).
-
-```bash
-sudo cp deploy/*.service deploy/*.timer /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable --now rms-web.service rms-neighbours-refresh.timer
-```
+| `RMS_WEB_CALIB` | `0` | server - set `1` to expose `/tonight` platepar solve/refit/bump buttons |
+| `STATION_FOOTPRINT_KM` | `100` | map - approx ground radius covered at 100 km altitude |
 
 ## Security
 

@@ -1,4 +1,4 @@
-#!/home/ian/vRMS/bin/python
+#!/usr/bin/env python3
 """refit_distortion.py — shared multi-frame distortion-refit core.
 
 Extracted from refit_tilt_distortion.py (2026-08-23) so both the one-off script and the

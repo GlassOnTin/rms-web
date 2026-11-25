@@ -1,17 +1,16 @@
-# deploy/ — systemd units & live-view stack (reference copies)
+# deploy/ - systemd templates & optional CSI live-view stack
 
-These are the version-controlled copies of the units and configs that run the
-dashboard **and** the live WebRTC feed on the station. They are installed
-out-of-band (not by pip); this dir is the source of truth — edit here, then copy
-to the runtime path below.
+`rms-*.service` and `rms-*.timer` are systemd unit templates rendered and installed by
+`../install.sh` (which substitutes `@USER@`, `@GROUP@`, `@REPO_DIR@`, `@VENV_PY@`, `@ENV_FILE@`,
+and `@MOUNT_LINE@`, and writes `/etc/rms-web/rms-web[-<instance>].env`).
 
-## Dashboard
-| repo file | runtime path | notes |
+## Dashboard units (installed by `../install.sh`)
+| template | runtime path | notes |
 |---|---|---|
-| `rms-web.service` | `/etc/systemd/system/` | the read-only LAN dashboard (`:8080`) |
+| `rms-web.service` | `/etc/systemd/system/` | read-only LAN dashboard (`:8080`) |
 | `rms-tonight-preview.service` | `/etc/systemd/system/` | live `/tonight` preview builder (`make_tonight_preview.py`) |
-| `rms-neighbours-refresh.{service,timer}` | `/etc/systemd/system/` | nightly neighbours map |
-| `rms-scorecard-refresh.{service,timer}` | `/etc/systemd/system/` | nightly scorecard |
+| `rms-neighbours-refresh.{service,timer}` | `/etc/systemd/system/` | weekly neighbours map |
+| `rms-scorecard-refresh.{service,timer}` | `/etc/systemd/system/` | daily scorecard |
 
 ## Live view (WebRTC)
 The camera feed shown on `/tonight` ("Live view") and linked from the header

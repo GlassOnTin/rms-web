@@ -1,12 +1,13 @@
 [Unit]
-Description=Refresh RMS dashboard neighbours scorecard (you vs nearby GMN stations)
+Description=Refresh RMS dashboard@DESC_SUFFIX@ neighbours scorecard (you vs nearby GMN stations)
 After=network-online.target
 Wants=network-online.target
-RequiresMountsFor=/mnt/nvme/RMS_data
+@MOUNT_LINE@
 
 [Service]
 Type=oneshot
-User=ian
-Group=ian
-WorkingDirectory=/home/ian/source/rms-web
-ExecStart=/usr/bin/python3 /home/ian/source/rms-web/make_scorecard.py
+User=@USER@
+Group=@GROUP@
+WorkingDirectory=@REPO_DIR@
+EnvironmentFile=-@ENV_FILE@
+ExecStart=/usr/bin/python3 @REPO_DIR@/make_scorecard.py

@@ -13,13 +13,12 @@ daily file is a UTC day, so a UK night straddles a file boundary — treat as in
 import os, re, sys, json, math, glob, urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-RMS_DATA = os.environ.get("RMS_DATA", "/mnt/nvme/RMS_data")
 
 def _rms_cfg(key, default=None):
-    """Read a key (stationID/latitude/longitude) from the RMS .config so the
+    """Read a key (stationID/latitude/longitude/data_dir) from the RMS .config so the
     scorecard tracks the live station identity. Env vars override; RMS_CONFIG
     sets the config path."""
-    path = os.environ.get("RMS_CONFIG", os.path.expanduser("~/source/RMS/.config"))
+    path = os.path.expanduser(os.environ.get("RMS_CONFIG", "~/source/RMS/.config"))
     try:
         for line in open(path):
             line = line.split(";", 1)[0]
@@ -28,6 +27,8 @@ def _rms_cfg(key, default=None):
     except OSError:
         pass
     return default
+
+RMS_DATA = os.path.expanduser(os.environ.get("RMS_DATA") or _rms_cfg("data_dir") or "~/RMS_data")
 
 STATION_CODE = os.environ.get("STATION_CODE") or _rms_cfg("stationID") or "XX0001"
 _lat = os.environ.get("STATION_LAT") or _rms_cfg("latitude")

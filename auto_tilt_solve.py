@@ -1,4 +1,4 @@
-#!/home/ian/vRMS/bin/python
+#!/usr/bin/env python3
 """
 auto_tilt_solve.py — durable one-shot platepar solver for the 30-deg north tilt.
 
@@ -17,21 +17,36 @@ converge until stage-2 runs). Stage-2 writes its own marker ~/.tilt_refit_done.
 
 To re-enable BOTH stages after a future camera move:
     rm ~/.tilt_autosolve_done ~/.tilt_refit_done
-Logs to /mnt/nvme/RMS_data/logs/auto_tilt_solve.log
+Logs to <RMS_DATA>/logs/auto_tilt_solve.log
 """
 import os, sys, glob, shutil, re, time, datetime, subprocess
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))   # for calib_lock (sibling)
-sys.path.insert(0, "/home/ian/source/RMS")
+HOME    = os.path.expanduser("~")
+RMS_SRC = os.path.expanduser(os.environ.get("RMS_SOURCE", "~/source/RMS"))
+sys.path.insert(0, RMS_SRC)
 import calib_lock
 
-MARKER  = "/home/ian/.tilt_autosolve_done"
-SOLVING = "/home/ian/.tilt_solving"         # present while a forced (UI-triggered) solve runs
-FORCE   = os.environ.get("FORCE") == "1"     # UI "Re-solve platepar" button: bypass the auto guards
-LOG     = "/mnt/nvme/RMS_data/logs/auto_tilt_solve.log"
-LIVE_PP = "/home/ian/source/RMS/platepar_cmn2010.cal"
-CONFIG  = "/home/ian/source/RMS/.config"
-WORK    = "/home/ian/platesolve_4mm"
-CAP     = "/mnt/nvme/RMS_data/CapturedFiles"
+CONFIG  = os.path.expanduser(os.environ.get("RMS_CONFIG", os.path.join(RMS_SRC, ".config")))
+
+def _cfg(key, default=None):
+    try:
+        for line in open(CONFIG):
+            line = line.split(";", 1)[0]
+            if line.strip().startswith(key + ":"):
+                return line.split(":", 1)[1].strip()
+    except OSError:
+        pass
+    return default
+
+DATA    = os.path.expanduser(os.environ.get("RMS_DATA") or _cfg("data_dir") or "~/RMS_data")
+STATION = os.environ.get("STATION_NAME") or _cfg("stationID") or "UK"
+MARKER  = os.path.join(HOME, ".tilt_autosolve_done")
+SOLVING = os.path.join(HOME, ".tilt_solving")       # present while a forced (UI-triggered) solve runs
+FORCE   = os.environ.get("FORCE") == "1"            # UI "Re-solve platepar" button: bypass the auto guards
+LOG     = os.path.join(DATA, "logs", "auto_tilt_solve.log")
+LIVE_PP = os.path.expanduser(os.environ.get("RMS_PLATEPAR", os.path.join(RMS_SRC, "platepar_cmn2010.cal")))
+WORK    = os.path.join(HOME, "platesolve_4mm")
+CAP     = os.path.join(DATA, "CapturedFiles")
 STAR_MIN = 70               # lowered from 85 (2026-08-22): clear night, live count ~68-70 after the intensity_threshold fix
 ALT_RANGE, AZ_TOL = (50.0, 70.0), 45.0      # 30-deg north tilt -> alt~60, az within 45 of north
 FSCALE_RANGE, MATCH_MIN = (17.0, 22.0), 40  # 4mm lens ~19.67 px/deg; enough matched stars
@@ -46,7 +61,7 @@ def log(m):
 
 def recent_star_max():
     """Cheap clear-check from the newest capture log's recent detections."""
-    logs = sorted(glob.glob("/mnt/nvme/RMS_data/logs/log_UK00DY_*.log"), key=os.path.getmtime)
+    logs = sorted(glob.glob(os.path.join(DATA, "logs", "log_%s_*.log" % STATION)), key=os.path.getmtime)
     if not logs:
         return 0
     out = subprocess.run(["tail", "-500", logs[-1]], capture_output=True, text=True).stdout
@@ -58,7 +73,7 @@ def main():
         return                                  # already solved & deployed; disarmed (FORCE overrides)
 
     # must be actively capturing (newest FF fresh) — i.e. night, camera live
-    nights = sorted(glob.glob(os.path.join(CAP, "UK00DY_*/")), key=os.path.getmtime)
+    nights = sorted(glob.glob(os.path.join(CAP, "%s_*/" % STATION)), key=os.path.getmtime)
     if not nights:
         return
     night = nights[-1]
@@ -94,8 +109,8 @@ def main():
     txt = re.sub(r'(?im)^(\s*fov_w\s*:\s*)\S+', r'\g<1>64', txt)
     txt = re.sub(r'(?im)^(\s*fov_h\s*:\s*)\S+', r'\g<1>50', txt)
     open(os.path.join(WORK, ".config"), "w").write(txt)
-    os.system("cd /home/ian/source/RMS && /home/ian/vRMS/bin/python -m RMS.ExtractStars "
-              "%s -c %s/.config >/dev/null 2>&1" % (WORK, WORK))
+    subprocess.run([sys.executable, "-m", "RMS.ExtractStars", WORK, "-c", os.path.join(WORK, ".config")],
+                   cwd=RMS_SRC, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
     config = cr.parse(os.path.join(WORK, ".config"))
     cat = loadCatalogStars(config, 6.5)

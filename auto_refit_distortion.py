@@ -1,4 +1,4 @@
-#!/home/ian/vRMS/bin/python
+#!/usr/bin/env python3
 """auto_refit_distortion.py — durable stage-2 of the tilt auto-solve: distortion refit.
 
 Companion to auto_tilt_solve.py (stage-1, the fast coarse pointing solve on the first clear
@@ -16,7 +16,7 @@ Markers:
   ~/.tilt_autosolve_done  (stage-1, written by auto_tilt_solve.py — pointing solved)
   ~/.tilt_refit_done      (stage-2, written here — distortion refined; disarms this stage)
 To re-enable BOTH stages after a future camera move: rm ~/.tilt_autosolve_done ~/.tilt_refit_done
-Logs to /mnt/nvme/RMS_data/logs/auto_refit_distortion.log
+Logs to <RMS_DATA>/logs/auto_refit_distortion.log
 """
 import os
 import sys
@@ -25,17 +25,32 @@ import shutil
 import datetime
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))   # for refit_distortion + calib_lock (siblings)
-sys.path.insert(0, "/home/ian/source/RMS")
+HOME    = os.path.expanduser("~")
+RMS_SRC = os.path.expanduser(os.environ.get("RMS_SOURCE", "~/source/RMS"))
+sys.path.insert(0, RMS_SRC)
 import calib_lock
 
-COARSE_MARKER = "/home/ian/.tilt_autosolve_done"
-REFIT_MARKER  = "/home/ian/.tilt_refit_done"
-REFITTING     = "/home/ian/.tilt_refitting"      # present while a forced (UI-triggered) refit runs
-FORCE         = os.environ.get("FORCE") == "1"    # UI "Refit distortion" button: bypass the auto guards
-LOG           = "/mnt/nvme/RMS_data/logs/auto_refit_distortion.log"
-LIVE_PP       = "/home/ian/source/RMS/platepar_cmn2010.cal"
-CONFIG        = "/home/ian/source/RMS/.config"
-ARCHIVE       = "/mnt/nvme/RMS_data/ArchivedFiles"
+CONFIG = os.path.expanduser(os.environ.get("RMS_CONFIG", os.path.join(RMS_SRC, ".config")))
+
+def _cfg(key, default=None):
+    try:
+        for line in open(CONFIG):
+            line = line.split(";", 1)[0]
+            if line.strip().startswith(key + ":"):
+                return line.split(":", 1)[1].strip()
+    except OSError:
+        pass
+    return default
+
+DATA          = os.path.expanduser(os.environ.get("RMS_DATA") or _cfg("data_dir") or "~/RMS_data")
+STATION       = os.environ.get("STATION_NAME") or _cfg("stationID") or "UK"
+COARSE_MARKER = os.path.join(HOME, ".tilt_autosolve_done")
+REFIT_MARKER  = os.path.join(HOME, ".tilt_refit_done")
+REFITTING     = os.path.join(HOME, ".tilt_refitting")      # present while a forced (UI-triggered) refit runs
+FORCE         = os.environ.get("FORCE") == "1"             # UI "Refit distortion" button: bypass the auto guards
+LOG           = os.path.join(DATA, "logs", "auto_refit_distortion.log")
+LIVE_PP       = os.path.expanduser(os.environ.get("RMS_PLATEPAR", os.path.join(RMS_SRC, "platepar_cmn2010.cal")))
+ARCHIVE       = os.path.join(DATA, "ArchivedFiles")
 
 MIN_DARK_FRAMES = 30       # dark-window CALSTARS frames needed to attempt a refit
 MAX_DEPLOY_RMSD = 0.60     # px; don't deploy a still-poor fit (cloudy night) -> retry next night
@@ -68,7 +83,7 @@ def main():
     # the main night, and cloudy/empty-CALSTARS nights are naturally skipped.
     marker_mtime = os.path.getmtime(COARSE_MARKER)
     best_n, night = 0, None
-    for cand in glob.glob(os.path.join(ARCHIVE, "UK00DY_*/")):
+    for cand in glob.glob(os.path.join(ARCHIVE, "%s_*/" % STATION)):
         if os.path.getmtime(cand) <= marker_mtime:
             continue
         csf = [f for f in os.listdir(cand) if f.startswith("CALSTARS")]

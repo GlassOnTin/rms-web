@@ -1,4 +1,4 @@
-#!/home/ian/vRMS/bin/python
+#!/usr/bin/env python3
 """refit_tilt_distortion.py — one-off headless distortion refit of the tilt platepar.
 
 Thin wrapper around refit_distortion.refit_night (the shared, validated core). The deployed
@@ -13,19 +13,22 @@ import os
 import sys
 import logging
 
-sys.path.insert(0, "/home/ian/source/RMS")
+RMS_SRC = os.path.expanduser(os.environ.get("RMS_SOURCE", "~/source/RMS"))
+sys.path.insert(0, RMS_SRC)
 logging.disable(logging.CRITICAL)
 
 import RMS.ConfigReader as cr
 from refit_distortion import refit_night, sane_refit
 from RMS.Formats.Platepar import Platepar
 
-ARCH = os.environ.get("ARCH", "/mnt/nvme/RMS_data/ArchivedFiles/UK00DY_20260822_204209_537644")
+ARCH = os.environ.get("ARCH")
+if not ARCH:
+    sys.exit("Set ARCH=/path/to/ArchivedFiles/<night_dir> before running refit_tilt_distortion.py")
 DISTORTION = os.environ.get("DIST", "radial7-odd")
 FIXED_SCALE = os.environ.get("FIXSCALE", "0") == "1"
-OUT = "/home/ian/platepar_refit.cal"
+OUT = os.path.expanduser(os.environ.get("OUT", "~/platepar_refit.cal"))
 
-config = cr.parse("/home/ian/source/RMS/.config")
+config = cr.parse(os.path.expanduser(os.environ.get("RMS_CONFIG", os.path.join(RMS_SRC, ".config"))))
 
 base = Platepar()
 base.read(os.path.join(ARCH, "platepar_cmn2010.cal"))

@@ -1,21 +1,12 @@
-"""Meteociel WRF-NMM 3-layer cloud-cover fetcher for UK00DY (Denmead).
+"""Meteociel WRF-NMM 3-layer cloud-cover fetcher for European RMS stations.
 
 Decodes the 'Couches nebulosite' map series into per-hour low/mid/high cloud
 coverage at the station pixel and caches the result in wx_wrf.json for
 rms_web.py to render. Called from the make_tonight_preview daemon loop; the
-daemon's Pillow (system dist-packages) does the decoding, rms_web stays
-stdlib-only.
-
-Georeferencing was fitted by chamfer-matching the map's olive border pixels
-against the Natural Earth 50 m coastline (mean residual ~2.6 px, and the fit
-transfers unchanged across frames/runs). Encoding: 768x768 palette PNG,
-R/G/B = low/mid/high coverage quantised to {0,30,60,90,95,99}%.
-
-The run time is inferred from the image Last-Modified (the page carries no
-machine-readable run time): run = last 6 h UTC slot at or before
-Last-Modified minus 30 min; if Last-Modified minus run exceeds 6 h (a very
-late publish), the run is shifted forward one slot. The inferred run is shown
-in the chart caption, so a wrong inference is visible rather than silent.
+daemon's Pillow does the decoding, rms_web stays stdlib-only.
+Station latitude/longitude come from STATION_LAT/STATION_LON or RMS .config
+(rounded to 2 d.p., ~1 km); stations outside the Europe WRF-NMM domain cleanly
+no-op.
 """
 
 import io
@@ -29,15 +20,36 @@ from urllib.request import Request, urlopen
 HERE = os.path.dirname(os.path.abspath(__file__))
 CACHE_PATH = os.path.join(HERE, "wx_wrf.json")
 
-STATION_LAT = 50.8987
-STATION_LON = -1.0589
+
+def _rms_cfg(key, default=None):
+    path = os.path.expanduser(os.environ.get("RMS_CONFIG", "~/source/RMS/.config"))
+    try:
+        for line in open(path):
+            line = line.split(";", 1)[0]
+            if line.strip().startswith(key + ":"):
+                return line.split(":", 1)[1].strip()
+    except OSError:
+        pass
+    return default
+
+
+_raw_lat = os.environ.get("STATION_LAT") or _rms_cfg("latitude")
+_raw_lon = os.environ.get("STATION_LON") or _rms_cfg("longitude")
+STATION_LAT = round(float(_raw_lat), 2) if _raw_lat is not None else None
+STATION_LON = round(float(_raw_lon), 2) if _raw_lon is not None else None
 
 # Affine fit: x = A*lon + C, y = E*(lat-50) + F  (768x768 map pixels;
 # the fit was done on the lat-50 offset, so keep that convention here)
 FIT_A, FIT_C = 15.402, 305.87
 FIT_E, FIT_F = -20.209, 442.114
-PIXEL_X = int(round(FIT_A * STATION_LON + FIT_C))          # 290
-PIXEL_Y = int(round(FIT_E * (STATION_LAT - 50.0) + FIT_F))  # 424
+if STATION_LAT is not None and STATION_LON is not None:
+    PIXEL_X = int(round(FIT_A * STATION_LON + FIT_C))
+    PIXEL_Y = int(round(FIT_E * (STATION_LAT - 50.0) + FIT_F))
+    IN_BOUNDS = (34.0 <= STATION_LAT <= 62.0 and -15.0 <= STATION_LON <= 25.0
+                 and 0 <= PIXEL_X < 768 and 0 <= PIXEL_Y < 768)
+else:
+    PIXEL_X = PIXEL_Y = -1
+    IN_BOUNDS = False
 
 # Palette value -> coverage percent (legend: 0/30/60/90/95/99).
 # Pixels outside this exact palette (map background, borders, outlines) are
@@ -46,7 +58,7 @@ LEVELS = {0: 0, 102: 30, 136: 60, 170: 90, 204: 95, 255: 99}
 
 BASE_URL = "https://modeles16.meteociel.fr/modeles/wrfnmm-eur/nmm-38-{ech}-0.png"
 ECH_HOURS = list(range(1, 19))       # hourly frames 1..18 covers dusk to dawn
-USER_AGENT = "rms-web/UK00DY-personal-station"
+USER_AGENT = "rms-web/0.2 (+https://github.com/GlassOnTin/rms-web)"
 
 UPDATE_INTERVAL_S = 600              # min seconds between fetch cycles
 FRAME_DELAY_S = 1.0                  # pause between frames within a cycle
@@ -132,6 +144,8 @@ def update(now=None):
     Self-throttled (UPDATE_INTERVAL_S); safe to call every daemon loop.
     Returns the cache dict, or None when nothing usable was fetched yet.
     """
+    if not IN_BOUNDS:
+        return None
     cache = _load_cache()
     last = cache.get("last_update_utc")
     if last:

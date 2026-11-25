@@ -14,7 +14,7 @@ those flags, is what actually enforces exclusion.
 """
 import os, errno, time, datetime
 
-LOCK = "/home/ian/.calib_lock"
+LOCK = os.path.expanduser(os.environ.get("RMS_CALIB_LOCK", "~/.calib_lock"))
 STALE_S = 20 * 60
 
 

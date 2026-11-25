@@ -11,7 +11,21 @@ import os, re, html, time, glob, datetime, urllib.parse, urllib.request, mimetyp
 import json, threading, statistics
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-ROOT = os.environ.get("RMS_DATA", "/mnt/nvme/RMS_data")
+HOME = os.path.expanduser("~")
+
+def rms_cfg(key, default=None):
+    """Read a key (e.g. stationID, data_dir) from the RMS .config."""
+    path = os.path.expanduser(os.environ.get("RMS_CONFIG", "~/source/RMS/.config"))
+    try:
+        for line in open(path):
+            line = line.split(";", 1)[0]
+            if line.strip().startswith(key + ":"):
+                return line.split(":", 1)[1].strip()
+    except OSError:
+        pass
+    return default
+
+ROOT = os.path.expanduser(os.environ.get("RMS_DATA") or rms_cfg("data_dir") or "~/RMS_data")
 ARCHIVED = os.path.join(ROOT, "CapturedFiles")   # nights live here; ArchivedFiles holds detections
 ARCH_DET = os.path.join(ROOT, "ArchivedFiles")
 PORT = int(os.environ.get("RMS_WEB_PORT", "8080"))
@@ -27,21 +41,11 @@ DETGEN = os.path.join(ASSET_DIR, "detection_media.py")
 VENV_PY = os.path.expanduser(os.environ.get("RMS_WEB_VENV_PY", "~/vRMS/bin/python3"))
 # systemd capture unit to report status for (2nd instances run their own unit name)
 CAPTURE_SERVICE = os.environ.get("RMS_CAPTURE_SERVICE", "rms-capture")
-# Calibration UI + solvers (tilt/bump/refit) are wired to the main station's
-# RMS clone and .config; a 2nd instance without its own calibration keeps them off.
-CALIB_TOOLS = os.environ.get("RMS_WEB_CALIB", "1" if CAPTURE_SERVICE == "rms-capture" else "0") == "1"
-
-def rms_cfg(key, default=None):
-    """Read a key (e.g. stationID) from the RMS .config so the header tracks the live station code."""
-    path = os.environ.get("RMS_CONFIG", os.path.expanduser("~/source/RMS/.config"))
-    try:
-        for line in open(path):
-            line = line.split(";", 1)[0]
-            if line.strip().startswith(key + ":"):
-                return line.split(":", 1)[1].strip()
-    except OSError:
-        pass
-    return default
+# Calibration UI + solvers (tilt/bump/refit): opt-in via RMS_WEB_CALIB=1, or auto-enabled
+# on an already-enrolled primary station where ~/.tilt_autosolve_done is present.
+_DEF_CALIB = "1" if (CAPTURE_SERVICE == "rms-capture"
+                     and os.path.isfile(os.path.join(HOME, ".tilt_autosolve_done"))) else "0"
+CALIB_TOOLS = os.environ.get("RMS_WEB_CALIB", _DEF_CALIB) == "1"
 
 # no baked-in identity: env override, else the station code from the RMS .config
 STATION_NAME = os.environ.get("STATION_NAME") or rms_cfg("stationID") or "RMS"
@@ -318,6 +322,17 @@ def tonight_block_media(ff, kind):
                 _det_gen("block" + kind, cap_dir, cache_dir, ff)
     return p if os.path.isfile(p) else None
 
+def _startcapture_running():
+    """Fallback liveness check for stock GMN Raspberry Pi images where RMS.StartCapture
+    is launched by desktop autostart (RMS_FirstRun.sh) rather than a systemd unit."""
+    pat = os.environ.get("RMS_STARTCAPTURE_PATTERN", "RMS.StartCapture")
+    if not pat:
+        return False
+    try:
+        return subprocess.run(["pgrep", "-f", pat], capture_output=True).returncode == 0
+    except Exception:
+        return False
+
 def capture_status():
     def active(s):
         try:
@@ -332,23 +347,25 @@ def capture_status():
         cur = cur[0] if cur else "—"
     except FileNotFoundError:
         cur = "—"
-    # Three-state label: the systemd unit is "active" all day (StartCapture idles
-    # until dusk), so actual liveness comes from FF file age in the newest night
-    # dir — only capture creates FF files (one every ~10 s).
-    if cap != "active":
-        state = "stopped" if cap in ("inactive", "?") else cap
-    else:
+    # Actual camera liveness comes from FF file age in the newest night dir — only active
+    # capture creates FF files (~1 every 10 s). Checking this first works identically for
+    # systemd-managed stations and stock GMN desktop-autostarted stations.
+    fresh_ff = False
+    if cur != "—":
+        try:
+            d = os.path.join(ARCHIVED, cur)
+            newest = max((os.path.getmtime(os.path.join(d, f))
+                          for f in os.listdir(d) if f.startswith("FF_") and f.endswith(".fits")),
+                         default=0)
+            fresh_ff = bool(newest and time.time() - newest < 900)
+        except OSError:
+            pass
+    if fresh_ff:
+        state = "live"
+    elif cap == "active" or (cap in ("inactive", "?") and _startcapture_running()):
         state = "waiting for dusk"
-        if cur != "—":
-            try:
-                d = os.path.join(ARCHIVED, cur)
-                newest = max((os.path.getmtime(os.path.join(d, f))
-                              for f in os.listdir(d) if f.startswith("FF_") and f.endswith(".fits")),
-                             default=0)
-                if newest and time.time() - newest < 900:
-                    state = "live"
-            except OSError:
-                pass
+    else:
+        state = "stopped" if cap in ("inactive", "?") else cap
     return state, cur
 
 _statrep_cache = {"t": 0.0, "present": None}
@@ -1395,7 +1412,7 @@ class H(BaseHTTPRequestHandler):
         wx_chart = ""
         if _wxsvg:
             wx_chart = ("<h3>Cloud forecast <span class=muted style='font-size:12px'>"
-                        "· Météociel WRF-NMM run {_wxrun} · % at Denmead</span></h3>"
+                        "· Météociel WRF-NMM run {_wxrun} · % at {_wxloc}</span></h3>"
                         "{_wxsvg}"
                         "<p class=muted style='margin:2px 0;font-size:12px'>Shaded bands: "
                         "<span style='color:#e28b8b'>low</span> · "
@@ -1404,7 +1421,10 @@ class H(BaseHTTPRequestHandler):
                         "Météociel WRF-NMM maps at the station's location. A numerical "
                         "forecast, not measured at this site — cloud edges on the map are "
                         "coarse, and the camera can see through thin high cloud that the "
-                        "model shows as overcast.</p>").format(_wxrun=_wxrun, _wxsvg=_wxsvg)
+                        "model shows as overcast.</p>").format(
+                            _wxrun=html.escape(str(_wxrun)),
+                            _wxloc=html.escape(STATION_NAME),
+                            _wxsvg=_wxsvg)
         if hits:
             # clickable grid: each flagged block -> detail page with a video snippet
             # (same idea as /night, but keyed on the FF block since tonight has no

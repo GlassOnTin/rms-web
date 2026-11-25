@@ -29,8 +29,9 @@ import sys
 import urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+RMS_SRC = os.path.expanduser(os.environ.get("RMS_SOURCE", "~/source/RMS"))
 sys.path.insert(0, HERE)
-sys.path.insert(0, "/home/ian/source/RMS")
+sys.path.insert(0, RMS_SRC)
 
 import numpy as np
 from RMS.Formats.Platepar import Platepar
@@ -96,7 +97,8 @@ def main():
     ap.add_argument("--date", required=True, help="YYYY/MM/DD (UTC)")
     ap.add_argument("--start", required=True, help="HH:MM UTC")
     ap.add_argument("--end", required=True, help="HH:MM UTC")
-    ap.add_argument("--platepar", default="/home/ian/source/RMS/platepar_cmn2010.cal")
+    ap.add_argument("--platepar", default=os.path.expanduser(
+        os.environ.get("RMS_PLATEPAR", os.path.join(RMS_SRC, "platepar_cmn2010.cal"))))
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
 

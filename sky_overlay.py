@@ -17,7 +17,8 @@ import os, sys
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
-sys.path.insert(0, os.environ.get("RMS_SOURCE", "/home/ian/source/RMS"))
+_RMS_SRC = os.path.expanduser(os.environ.get("RMS_SOURCE", "~/source/RMS"))
+sys.path.insert(0, _RMS_SRC)
 import ephem
 from RMS.Astrometry.ApplyAstrometry import raDecToXYPP
 from RMS.Astrometry.Conversions import date2JD, altAz2RADec, raDec2AltAz
@@ -25,7 +26,7 @@ from RMS.Formats import Platepar
 
 OBLIQUITY = np.radians(23.4393)          # J2000 mean obliquity, for the ecliptic line
 
-PLATEPAR_PATH = os.environ.get("RMS_PLATEPAR", "/home/ian/source/RMS/platepar_cmn2010.cal")
+PLATEPAR_PATH = os.path.expanduser(os.environ.get("RMS_PLATEPAR", os.path.join(_RMS_SRC, "platepar_cmn2010.cal")))
 
 # (name, RA J2000 deg, Dec J2000 deg, Vmag) — IAU names, mag <= ~2.5, southern
 # never-risers left out. Projection clips to the FOV so extras are harmless.

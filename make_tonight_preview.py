@@ -35,8 +35,19 @@ try:
 except Exception:
     meteociel_wx = None
 
+def _rms_cfg(key, default=None):
+    path = os.path.expanduser(os.environ.get("RMS_CONFIG", "~/source/RMS/.config"))
+    try:
+        for line in open(path):
+            line = line.split(";", 1)[0]
+            if line.strip().startswith(key + ":"):
+                return line.split(":", 1)[1].strip()
+    except OSError:
+        pass
+    return default
+
 HERE = os.path.dirname(os.path.abspath(__file__))
-DATA = os.environ.get("RMS_DATA", "/mnt/nvme/RMS_data")
+DATA = os.path.expanduser(os.environ.get("RMS_DATA") or _rms_cfg("data_dir") or "~/RMS_data")
 CAP  = os.path.join(DATA, "CapturedFiles")
 STACK_PNG  = os.path.join(HERE, "tonight_stack.png")
 LATEST_PNG = os.path.join(HERE, "tonight_latest.png")
@@ -49,9 +60,11 @@ REBUILD_FLAG = os.path.join(HERE, ".tonight_rebuild_request")   # touched by the
 INTERVAL = int(os.environ.get("TONIGHT_INTERVAL", "20"))
 
 # Clear-sky gate: a frame enters the cumulative stack only if the sky is dark (low avepixel
-# median) AND not hazy/moonlit (maxpixel median below the intrinsic sensor floor
-# plus margin). See the gate comment in main().
-_DEF_AVE, _DEF_MAX = ("8.0", "45.0") if DATA == "/mnt/nvme/RMS_data" else ("118.0", "134.0")
+# median) AND not hazy/moonlit (maxpixel median below the intrinsic sensor floor plus margin).
+# RTSP IP cameras sit on an elevated H.264/ISP pedestal (~100-115 ADU); raw V4L2/CSI sensors
+# sit near 1-3 ADU. Auto-select from .config `device:` when env vars aren't explicitly set.
+_dev = (_rms_cfg("device") or "").lower()
+_DEF_AVE, _DEF_MAX = ("118.0", "134.0") if _dev.startswith("rtsp://") else ("8.0", "45.0")
 CLEAR_AVE_MAX = float(os.environ.get("CLEAR_AVE_MAX", _DEF_AVE))
 CLEAR_MAXPIX_MED = float(os.environ.get("CLEAR_MAXPIX_MED", _DEF_MAX))
 

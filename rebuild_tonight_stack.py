@@ -1,4 +1,4 @@
-#!/home/ian/vRMS/bin/python
+#!/usr/bin/env python3
 """rebuild_tonight_stack.py — CLI/headless rebuild of TONIGHT's cumulative stack from ALL of
 tonight's captured FFs (every segment of the dusk-anchored observing night), applying the
 clear-sky gate. Recovers frames missed before a capture restart/reboot or a gate change.
@@ -14,7 +14,7 @@ from PIL import Image
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
-sys.path.insert(0, "/home/ian/source/RMS")
+sys.path.insert(0, os.path.expanduser(os.environ.get("RMS_SOURCE", "~/source/RMS")))
 from make_tonight_preview import (rebuild_running, night_segments, night_key, stretch,
                                   ff_time, STACK_PNG, STATE_NPY, STATE_META, JSON_OUT, CAP)
 try:

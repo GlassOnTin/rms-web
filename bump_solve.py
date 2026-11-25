@@ -1,4 +1,4 @@
-#!/home/ian/vRMS/bin/python
+#!/usr/bin/env python3
 """
 bump_solve.py — recover the platepar after a camera BUMP (a knock / PSU-swap nudge),
 using the correspondence method that actually works on this wide fisheye and on
@@ -27,22 +27,37 @@ crashed run) is reclaimed. The UI also hides the button while the lock is presen
 
 On success it writes the auto markers (~/.tilt_autosolve_done + ~/.tilt_refit_done) so the
 cron auto-solve stays disarmed. Re-arm after a future move: rm those two markers.
-Logs to /mnt/nvme/RMS_data/logs/bump_solve.log
+Logs to <RMS_DATA>/logs/bump_solve.log
 """
 import os, sys, glob, copy, datetime
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))    # for calib_lock (same dir)
-sys.path.insert(0, "/home/ian/source/RMS")
+HOME    = os.path.expanduser("~")
+RMS_SRC = os.path.expanduser(os.environ.get("RMS_SOURCE", "~/source/RMS"))
+sys.path.insert(0, RMS_SRC)
 import numpy as np
 import calib_lock
 
-UI_FLAG = "/home/ian/.tilt_bumpsolving"          # UI state only; calib_lock enforces exclusion
-AUTOSOLVE_MARKER = "/home/ian/.tilt_autosolve_done"
-REFIT_MARKER     = "/home/ian/.tilt_refit_done"
-LIVE_PP = "/home/ian/source/RMS/platepar_cmn2010.cal"
-CONFIG  = "/home/ian/source/RMS/.config"
-LOG     = "/mnt/nvme/RMS_data/logs/bump_solve.log"
-ARCHIVED = "/mnt/nvme/RMS_data/ArchivedFiles"
-CAPTURED = "/mnt/nvme/RMS_data/CapturedFiles"
+CONFIG = os.path.expanduser(os.environ.get("RMS_CONFIG", os.path.join(RMS_SRC, ".config")))
+
+def _cfg(key, default=None):
+    try:
+        for line in open(CONFIG):
+            line = line.split(";", 1)[0]
+            if line.strip().startswith(key + ":"):
+                return line.split(":", 1)[1].strip()
+    except OSError:
+        pass
+    return default
+
+DATA     = os.path.expanduser(os.environ.get("RMS_DATA") or _cfg("data_dir") or "~/RMS_data")
+STATION  = os.environ.get("STATION_NAME") or _cfg("stationID") or "UK"
+UI_FLAG  = os.path.join(HOME, ".tilt_bumpsolving")        # UI state only; calib_lock enforces exclusion
+AUTOSOLVE_MARKER = os.path.join(HOME, ".tilt_autosolve_done")
+REFIT_MARKER     = os.path.join(HOME, ".tilt_refit_done")
+LIVE_PP  = os.path.expanduser(os.environ.get("RMS_PLATEPAR", os.path.join(RMS_SRC, "platepar_cmn2010.cal")))
+LOG      = os.path.join(DATA, "logs", "bump_solve.log")
+ARCHIVED = os.path.join(DATA, "ArchivedFiles")
+CAPTURED = os.path.join(DATA, "CapturedFiles")
 
 # --- sanity gates (this touches the LIVE science platepar) ---
 MIN_PEAK_STARS = 45        # richest frame must have this many detections to attempt a solve
@@ -70,7 +85,7 @@ def log(m):
 def find_night(config):
     """Newest Captured/Archived dir with a CALSTARS whose richest frame clears MIN_PEAK_STARS."""
     from RMS.Formats import CALSTARS
-    dirs = glob.glob(os.path.join(ARCHIVED, "UK00DY_*")) + glob.glob(os.path.join(CAPTURED, "UK00DY_*"))
+    dirs = glob.glob(os.path.join(ARCHIVED, "%s_*" % STATION)) + glob.glob(os.path.join(CAPTURED, "%s_*" % STATION))
     # newest by CAPTURE START (the UK00DY_YYYYMMDD_HHMMSS dirname sorts chronologically) — not by
     # mtime, which reflects reprocessing and can rank an earlier segment "newer". Newest-first keeps
     # temporal correctness: a bump's fix must come from post-bump (latest) data, not stale pointing.
