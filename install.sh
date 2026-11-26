@@ -26,6 +26,7 @@ RMS_DATA_OVERRIDE=""
 VENV_DIR=""
 CAPTURE_SVC=""
 ENABLE_CALIB="0"
+ENABLE_PR_SYNC="0"
 UNINSTALL="0"
 DRY_RUN="0"
 STAGE_DIR=""
@@ -47,6 +48,7 @@ Options:
   --venv <dir>              Path to vRMS virtualenv (default: ~<user>/vRMS)
   --capture-service <name>  systemd capture unit name if used (default: rms-capture[-<instance>])
   --enable-calib            Enable experimental /tonight platepar solve/refit/bump UI buttons
+  --enable-prerelease-sync  Enable automatic daytime/overcast-night RMS prerelease sync timer
   --skip-pip                Do not install missing matplotlib/pillow into vRMS
   --skip-initial-fetch      Skip initial neighbours map & scorecard build
   --dry-run                 Print generated config and units without writing or enabling
@@ -67,6 +69,7 @@ while [[ $# -gt 0 ]]; do
         --venv)            VENV_DIR="$2"; shift 2 ;;
         --capture-service) CAPTURE_SVC="$2"; shift 2 ;;
         --enable-calib)    ENABLE_CALIB="1"; shift ;;
+        --enable-prerelease-sync) ENABLE_PR_SYNC="1"; shift ;;
         --skip-pip)        SKIP_PIP="1"; shift ;;
         --skip-initial-fetch) SKIP_FETCH="1"; shift ;;
         --dry-run)         DRY_RUN="1"; shift ;;
@@ -103,6 +106,8 @@ NEIGH_SVC="rms-neighbours-refresh${SFX}.service"
 NEIGH_TMR="rms-neighbours-refresh${SFX}.timer"
 SCORE_SVC="rms-scorecard-refresh${SFX}.service"
 SCORE_TMR="rms-scorecard-refresh${SFX}.timer"
+PRSYNC_SVC="rms-prerelease-sync${SFX}.service"
+PRSYNC_TMR="rms-prerelease-sync${SFX}.timer"
 
 SUDO=""
 if [[ $EUID -ne 0 ]]; then
@@ -111,7 +116,7 @@ fi
 
 if [[ "$UNINSTALL" == "1" ]]; then
     echo "Removing rms-web units${DESC_SUFFIX}..."
-    for u in "$WEB_UNIT" "$PREV_UNIT" "$NEIGH_TMR" "$NEIGH_SVC" "$SCORE_TMR" "$SCORE_SVC"; do
+    for u in "$WEB_UNIT" "$PREV_UNIT" "$NEIGH_TMR" "$NEIGH_SVC" "$SCORE_TMR" "$SCORE_SVC" "$PRSYNC_TMR" "$PRSYNC_SVC"; do
         $SUDO systemctl disable --now "$u" 2>/dev/null || true
         $SUDO rm -f "/etc/systemd/system/$u"
     done
@@ -245,6 +250,8 @@ if [[ -n "$STAGE_DIR" ]]; then
     render_unit "rms-scorecard-refresh.service"  > "$UNIT_DIR/$SCORE_SVC"
     render_timer "rms-neighbours-refresh.timer" "$NEIGH_SVC" > "$UNIT_DIR/$NEIGH_TMR"
     render_timer "rms-scorecard-refresh.timer"  "$SCORE_SVC" > "$UNIT_DIR/$SCORE_TMR"
+    render_unit "rms-prerelease-sync.service"    > "$UNIT_DIR/$PRSYNC_SVC"
+    render_timer "rms-prerelease-sync.timer"    "$PRSYNC_SVC" > "$UNIT_DIR/$PRSYNC_TMR"
     echo "Staged config and units under $STAGE_DIR (station=${STATION_ID:-RMS}, data=$RMS_DATA_DIR, port=$PORT)."
     exit 0
 fi
@@ -258,9 +265,14 @@ render_unit "rms-neighbours-refresh.service" | $SUDO tee "$UNIT_DIR/$NEIGH_SVC" 
 render_unit "rms-scorecard-refresh.service"  | $SUDO tee "$UNIT_DIR/$SCORE_SVC" >/dev/null
 render_timer "rms-neighbours-refresh.timer" "$NEIGH_SVC" | $SUDO tee "$UNIT_DIR/$NEIGH_TMR" >/dev/null
 render_timer "rms-scorecard-refresh.timer"  "$SCORE_SVC" | $SUDO tee "$UNIT_DIR/$SCORE_TMR" >/dev/null
+render_unit "rms-prerelease-sync.service"    | $SUDO tee "$UNIT_DIR/$PRSYNC_SVC" >/dev/null
+render_timer "rms-prerelease-sync.timer"    "$PRSYNC_SVC" | $SUDO tee "$UNIT_DIR/$PRSYNC_TMR" >/dev/null
 
 $SUDO systemctl daemon-reload
 $SUDO systemctl enable --now "$WEB_UNIT" "$PREV_UNIT" "$NEIGH_TMR" "$SCORE_TMR"
+if [[ "$ENABLE_PR_SYNC" == "1" ]]; then
+    $SUDO systemctl enable --now "$PRSYNC_TMR"
+fi
 $SUDO systemctl restart "$WEB_UNIT" "$PREV_UNIT"
 
 if [[ "$SKIP_FETCH" == "0" ]]; then

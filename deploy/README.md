@@ -11,6 +11,7 @@ and `@MOUNT_LINE@`, and writes `/etc/rms-web/rms-web[-<instance>].env`).
 | `rms-tonight-preview.service` | `/etc/systemd/system/` | live `/tonight` preview builder (`make_tonight_preview.py`) |
 | `rms-neighbours-refresh.{service,timer}` | `/etc/systemd/system/` | weekly neighbours map |
 | `rms-scorecard-refresh.{service,timer}` | `/etc/systemd/system/` | daily scorecard |
+| `rms-prerelease-sync.{service,timer}` | `/etc/systemd/system/` or `~/.config/systemd/user/` | midday & overcast-night RMS `prerelease` updater (opt-in via `--enable-prerelease-sync`) |
 
 ## Live view (WebRTC)
 The camera feed shown on `/tonight` ("Live view") and linked from the header

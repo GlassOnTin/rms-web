@@ -417,6 +417,97 @@ def ukmon_status():
     return ("uploaded " + when, "on", title)
 
 
+_pr_refresh_guard = {"t": 0.0, "lock": threading.Lock()}
+PR_SYNC_SCRIPT = os.path.join(ASSET_DIR, "rms_prerelease_sync.py")
+PR_STATUS_JSON = os.path.join(ASSET_DIR, ".rms_prerelease_status.json")
+
+def rms_prerelease_status():
+    """Return cached RMS git/prerelease sync status dict, triggering an async
+    hourly background refresh so page loads never block on `git fetch`."""
+    now = time.time()
+    data = None
+    stale = True
+    if os.path.isfile(PR_STATUS_JSON):
+        try:
+            st_age = now - os.path.getmtime(PR_STATUS_JSON)
+            data = json.load(open(PR_STATUS_JSON))
+            stale = st_age > 3600
+        except (OSError, ValueError):
+            data = None
+    if stale and os.path.isfile(PR_SYNC_SCRIPT):
+        do_bg = False
+        with _pr_refresh_guard["lock"]:
+            if now - _pr_refresh_guard["t"] > 120:
+                _pr_refresh_guard["t"] = now
+                do_bg = True
+        if do_bg:
+            def _bg():
+                try:
+                    subprocess.run(["nice", "-n", "15", "/usr/bin/python3", PR_SYNC_SCRIPT,
+                                    "--status", "--fetch-if-stale", "3600"],
+                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=60)
+                except Exception:
+                    pass
+            threading.Thread(target=_bg, daemon=True).start()
+    if data is None:
+        # Fast local fallback (<5 ms, no network) before the background check finishes
+        rms_src = os.path.expanduser(os.environ.get("RMS_SOURCE", "~/source/RMS"))
+        if os.path.isdir(os.path.join(rms_src, ".git")):
+            try:
+                br = subprocess.run(["git", "-C", rms_src, "rev-parse", "--abbrev-ref", "HEAD"],
+                                    capture_output=True, text=True, timeout=3).stdout.strip()
+                sh = subprocess.run(["git", "-C", rms_src, "rev-parse", "--short=8", "HEAD"],
+                                    capture_output=True, text=True, timeout=3).stdout.strip()
+                if sh:
+                    data = {"branch": br or "?", "head_short": sh, "behind_count": None}
+            except Exception:
+                pass
+    return data
+
+def rms_prerelease_pill():
+    """HTML header pill showing live RMS branch@sha and upstream prerelease sync state."""
+    st = rms_prerelease_status()
+    if not st or not st.get("head_short"):
+        return ""
+    br = st.get("branch") or "rms"
+    sh = st.get("head_short")
+    behind = st.get("behind_count")
+    last_res = st.get("last_result") or ""
+    patches = st.get("code_patches") or []
+    gate = (st.get("gate") or {}).get("reason") or ""
+
+    if last_res in ("conflict", "build_failed", "diverged", "ff_failed"):
+        cls = "off"
+        lbl = f"{br}@{sh} (! {last_res.replace('_', ' ')})"
+    elif behind is None:
+        cls = "wait"
+        lbl = f"{br}@{sh}"
+    elif behind == 0:
+        cls = "on"
+        lbl = f"{br}@{sh} ✓"
+    else:
+        cls = "wait"
+        lbl = f"{br}@{sh} ({behind} behind)"
+
+    tips = [f"RMS {br} @ {sh}"]
+    if st.get("upstream_short"):
+        tips.append(f"upstream {st.get('remote', 'upstream')}/{st.get('target_branch', 'prerelease')}: {st['upstream_short']}")
+    if behind is not None:
+        tips.append("up to date" if behind == 0 else f"{behind} commit(s) behind")
+    if patches:
+        tips.append("local patches: " + ", ".join(patches))
+    if last_res:
+        tips.append("last sync: " + last_res + (f" ({st.get('last_detail')})" if st.get("last_detail") else ""))
+    if gate:
+        tips.append("gate: " + gate)
+    if st.get("checked_utc"):
+        tips.append("checked: " + st["checked_utc"])
+    title = " · ".join(tips)
+    return ('\n<a href="/api/rms_version" style="text-decoration:none">'
+            '<span class="pill {}" title="{}">rms: {}</span></a>'.format(
+                cls, html.escape(title, quote=True), html.escape(lbl)))
+
+
 def capture_window():
     """Tonight's planned capture window from the newest RMS logs: StartCapture
     logs 'Next start time: ... UTC' (dusk) and '... to start recording for X hrs'
@@ -1152,7 +1243,7 @@ details.sbox>summary{{cursor:pointer;font-weight:600;color:#dce6f7;font-size:14p
 input.sinp{{background:#0d1220;color:#eaf0fa;border:1px solid #2f4a63;border-radius:6px;padding:5px 9px;font-size:13px;font-family:monospace}}
 </style></head><body>
 <header><h1>🌠 {station} meteor station</h1>
-<span class="pill {capcls}">capture: {cap}</span>{ukmonpill}
+<span class="pill {capcls}">capture: {cap}</span>{rmspill}{ukmonpill}
 <span class="muted">tonight: {cur}</span>
 <a href="/tonight">tonight</a>
 <a href="/">nights</a>
@@ -1186,9 +1277,11 @@ class H(BaseHTTPRequestHandler):
         ukmonpill = ("" if uk is None else
                      "\n<span class=\"pill {}\" title=\"{}\">ukmon: {}</span>".format(
                          uk[1], html.escape(uk[2], quote=True), html.escape(uk[0])))
+        rmspill = rms_prerelease_pill()
         htmlout = PAGE.format(title=html.escape(title), station=html.escape(station),
                               cap=html.escape(cap),
                               capcls={"live": "on", "waiting for dusk": "wait"}.get(cap, "off"),
+                              rmspill=rmspill,
                               ukmonpill=ukmonpill,
                               cur=html.escape(cur), host=html.escape(host), body=body, refresh=refresh)
         self._send(200, "text/html; charset=utf-8", htmlout.encode())
@@ -1241,6 +1334,9 @@ class H(BaseHTTPRequestHandler):
             return self.serve_asset("tonight_detected.png", "image/png")
         if u.path == "/scorecard":
             return self.scorecard()
+        if u.path == "/api/rms_version":
+            st = rms_prerelease_status() or {"error": "unavailable"}
+            return self._send(200, "application/json; charset=utf-8", json.dumps(st, indent=2).encode())
         self._send(404, "text/plain", b"not found")
 
     def do_POST(self):

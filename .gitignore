@@ -24,3 +24,6 @@ detcache/
 rms_web.py.bak-*
 wx_wrf.json
 make_tonight_preview.py.bak-*
+.rms_prerelease_status.json
+.rms_prerelease_sync.lock
+rms_update_backups/

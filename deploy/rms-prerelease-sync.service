@@ -1,0 +1,13 @@
+[Unit]
+Description=Sync CroatianMeteorNetwork/RMS prerelease@DESC_SUFFIX@ (daytime or overcast night only)
+After=network-online.target
+Wants=network-online.target
+@MOUNT_LINE@
+
+[Service]
+Type=oneshot
+User=@USER@
+Group=@GROUP@
+WorkingDirectory=@REPO_DIR@
+EnvironmentFile=-@ENV_FILE@
+ExecStart=/usr/bin/python3 @REPO_DIR@/rms_prerelease_sync.py --apply

@@ -1,0 +1,10 @@
+[Unit]
+Description=Midday & overcast-night check for RMS prerelease updates
+
+[Timer]
+OnCalendar=*-*-* 02:30,12:30:00
+RandomizedDelaySec=15m
+Persistent=true
+
+[Install]
+WantedBy=timers.target

@@ -29,6 +29,12 @@ No framework, four pieces:
   `*_radiants.txt`, `FR_*.bin` cutouts, and `FF_*.fits` blocks (with fallback to `CapturedFiles/`
   while still on disk), writing thumbnails, sky-annotated frames, `maxpixel - avepixel` residuals,
   and 12.5 fps MP4 clips into `detcache/`.
+- **`rms_prerelease_sync.py`** - optional daytime and confirmed-cloudy-night tracker/updater for
+  `CroatianMeteorNetwork/RMS` `prerelease`. Evaluates solar elevation, recent `FF_*.fits` age,
+  20-minute star-extraction counts, and active post-processing (`RMS.Reprocess`, `ukmonPostProc`,
+  `iStream`) before fast-forwarding, preserving `.config`/`mask.bmp`/`camera_settings.json` and
+  rolling back atomically if a local code patch conflicts or Cython smoke imports fail. Surfaces
+  live `branch@sha` sync status in the `rms-web` header pill and `/api/rms_version`.
 - **`make_tonight_preview.py`** — a small daemon behind the **/tonight** page: incrementally
   stacks tonight's FF files as they are written and renders the latest-sky and cumulative-stack
   previews. Its overlay modules annotate each render through the live platepar:
