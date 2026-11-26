@@ -36,7 +36,8 @@ except Exception:
     meteociel_wx = None
 
 def _rms_cfg(key, default=None):
-    path = os.path.expanduser(os.environ.get("RMS_CONFIG", "~/source/RMS/.config"))
+    default_cfg = os.path.join(os.environ.get("RMS_SOURCE", "~/source/RMS"), ".config")
+    path = os.path.expanduser(os.environ.get("RMS_CONFIG") or default_cfg)
     try:
         for line in open(path):
             line = line.split(";", 1)[0]

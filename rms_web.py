@@ -15,7 +15,8 @@ HOME = os.path.expanduser("~")
 
 def rms_cfg(key, default=None):
     """Read a key (e.g. stationID, data_dir) from the RMS .config."""
-    path = os.path.expanduser(os.environ.get("RMS_CONFIG", "~/source/RMS/.config"))
+    default_cfg = os.path.join(os.environ.get("RMS_SOURCE", "~/source/RMS"), ".config")
+    path = os.path.expanduser(os.environ.get("RMS_CONFIG") or default_cfg)
     try:
         for line in open(path):
             line = line.split(";", 1)[0]
